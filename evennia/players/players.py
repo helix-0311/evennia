@@ -17,10 +17,11 @@ from django.utils import timezone
 from evennia.typeclasses.models import TypeclassBase
 from evennia.players.manager import PlayerManager
 from evennia.players.models import PlayerDB
+from evennia.objects.models import ObjectDB
 from evennia.comms.models import ChannelDB
 from evennia.commands import cmdhandler
 from evennia.utils import logger
-from evennia.utils.utils import (lazy_property, to_str,
+from evennia.utils.utils import (lazy_property,
                                  make_iter, to_unicode, is_iter,
                                  variable_from_module)
 from evennia.typeclasses.attributes import NickHandler
@@ -39,6 +40,7 @@ _MULTISESSION_MODE = settings.MULTISESSION_MODE
 _MAX_NR_CHARACTERS = settings.MAX_NR_CHARACTERS
 _CMDSET_PLAYER = settings.CMDSET_PLAYER
 _CONNECT_CHANNEL = None
+
 
 class PlayerSessionHandler(object):
     """
@@ -96,7 +98,6 @@ class PlayerSessionHandler(object):
 
         """
         return len(self.get())
-
 
 
 class DefaultPlayer(with_metaclass(TypeclassBase, PlayerDB)):
@@ -187,7 +188,6 @@ class DefaultPlayer(with_metaclass(TypeclassBase, PlayerDB)):
     def sessions(self):
         return PlayerSessionHandler(self)
 
-
     # session-related methods
 
     def disconnect_session_from_player(self, session):
@@ -242,19 +242,19 @@ class DefaultPlayer(with_metaclass(TypeclassBase, PlayerDB)):
                     # we may take over another of our sessions
                     # output messages to the affected sessions
                     if _MULTISESSION_MODE in (1, 3):
-                        txt1 = "Sharing {c%s{n with another of your sessions."
-                        txt2 = "{c%s{n{G is now shared from another of your sessions.{n"
+                        txt1 = "Sharing |c%s|n with another of your sessions."
+                        txt2 = "|c%s|n|G is now shared from another of your sessions.|n"
                         self.msg(txt1 % obj.name, session=session)
                         self.msg(txt2 % obj.name, session=obj.sessions.all())
                     else:
-                        txt1 = "Taking over {c%s{n from another of your sessions."
-                        txt2 = "{c%s{n{R is now acted from another of your sessions.{n"
+                        txt1 = "Taking over |c%s|n from another of your sessions."
+                        txt2 = "|c%s|n|R is now acted from another of your sessions.|n"
                         self.msg(txt1 % obj.name, session=session)
                         self.msg(txt2 % obj.name, session=obj.sessions.all())
                         self.unpuppet_object(obj.sessions.get())
             elif obj.player.is_connected:
                 # controlled by another player
-                self.msg("{R{c%s{R is already puppeted by another Player.")
+                self.msg("|c%s|R is already puppeted by another Player." % obj.key)
                 return
 
         # do the puppeting
@@ -336,8 +336,7 @@ class DefaultPlayer(with_metaclass(TypeclassBase, PlayerDB)):
                 by this Player.
 
         """
-        return list(set(session.puppet for session in self.sessions.all()
-                                                    if session.puppet))
+        return list(set(session.puppet for session in self.sessions.all() if session.puppet))
 
     def __get_single_puppet(self):
         """
@@ -381,8 +380,8 @@ class DefaultPlayer(with_metaclass(TypeclassBase, PlayerDB)):
         self.attributes.clear()
         self.nicks.clear()
         self.aliases.clear()
-        super(PlayerDB, self).delete(*args, **kwargs)
-    ## methods inherited from database model
+        super(DefaultPlayer, self).delete(*args, **kwargs)
+    # methods inherited from database model
 
     def msg(self, text=None, from_obj=None, session=None, options=None, **kwargs):
         """
@@ -408,15 +407,16 @@ class DefaultPlayer(with_metaclass(TypeclassBase, PlayerDB)):
             try:
                 from_obj.at_msg_send(text=text, to_obj=self, **kwargs)
             except Exception:
+                # this may not be assigned.
                 pass
         try:
             if not self.at_msg_receive(text=text, **kwargs):
                 # abort message to this player
                 return
         except Exception:
+            # this may not be assigned.
             pass
 
-        text = None if text is None else str(text)
         kwargs["options"] = options
 
         # session relay
@@ -445,8 +445,7 @@ class DefaultPlayer(with_metaclass(TypeclassBase, PlayerDB)):
 
         """
         raw_string = to_unicode(raw_string)
-        raw_string = self.nicks.nickreplace(raw_string,
-                          categories=("inputline", "channel"), include_player=False)
+        raw_string = self.nicks.nickreplace(raw_string, categories=("inputline", "channel"), include_player=False)
         if not session and _MULTISESSION_MODE in (0, 1):
             # for these modes we use the first/only session
             sessions = self.sessions.get()
@@ -455,11 +454,11 @@ class DefaultPlayer(with_metaclass(TypeclassBase, PlayerDB)):
         return cmdhandler.cmdhandler(self, raw_string,
                                      callertype="player", session=session, **kwargs)
 
-    def search(self, searchdata, return_puppet=False,
-               nofound_string=None, multimatch_string=None, **kwargs):
+    def search(self, searchdata, return_puppet=False, search_object=False,
+               typeclass=None, nofound_string=None, multimatch_string=None, **kwargs):
         """
-        This is similar to `DefaultObject.search` but will search for
-        Players only.
+        This is similar to `DefaultObject.search` but defaults to searching
+        for Players only.
 
         Args:
             searchdata (str or int): Search criterion, the Player's
@@ -467,12 +466,22 @@ class DefaultPlayer(with_metaclass(TypeclassBase, PlayerDB)):
             return_puppet (bool, optional): Instructs the method to
                 return matches as the object the Player controls rather
                 than the Player itself (or None) if nothing is puppeted).
+            search_object (bool, optional): Search for Objects instead of
+                Players. This is used by e.g. the @examine command when
+                wanting to examine Objects while OOC.
+            typeclass (Player typeclass, optional): Limit the search
+                only to this particular typeclass. This can be used to
+                limit to specific player typeclasses or to limit the search
+                to a particular Object typeclass if `search_object` is True.
             nofound_string (str, optional): A one-time error message
                 to echo if `searchdata` leads to no matches. If not given,
                 will fall back to the default handler.
             multimatch_string (str, optional): A one-time error
                 message to echo if `searchdata` leads to multiple matches.
                 If not given, will fall back to the default handler.
+
+        Return:
+            match (Player, Object or None): A single Player or Object match.
         Notes:
             Extra keywords are ignored, but are allowed in call in
             order to make API more consistent with
@@ -484,7 +493,10 @@ class DefaultPlayer(with_metaclass(TypeclassBase, PlayerDB)):
             # handle wrapping of common terms
             if searchdata.lower() in ("me", "*me", "self", "*self",):
                 return self
-        matches = self.__class__.objects.player_search(searchdata)
+        if search_object:
+            matches = ObjectDB.objects.object_search(searchdata, typeclass=typeclass)
+        else:
+            matches = PlayerDB.objects.player_search(searchdata, typeclass=typeclass)
         matches = _AT_SEARCH_RESULT(matches, self, query=searchdata,
                                     nofound_string=nofound_string,
                                     multimatch_string=multimatch_string)
@@ -529,6 +541,7 @@ class DefaultPlayer(with_metaclass(TypeclassBase, PlayerDB)):
         idle = [session.cmd_last_visible for session in self.sessions.all()]
         if idle:
             return time.time() - float(max(idle))
+        return None
 
     @property
     def connection_time(self):
@@ -539,8 +552,9 @@ class DefaultPlayer(with_metaclass(TypeclassBase, PlayerDB)):
         conn = [session.conn_time for session in self.sessions.all()]
         if conn:
             return time.time() - float(min(conn))
+        return None
 
-    ## player hooks
+    # player hooks
 
     def basetype_setup(self):
         """
@@ -582,7 +596,6 @@ class DefaultPlayer(with_metaclass(TypeclassBase, PlayerDB)):
 
         """
         pass
-
 
     # Note that the hooks below also exist in the character object's
     # typeclass. You can often ignore these and rely on the character
@@ -712,7 +725,11 @@ class DefaultPlayer(with_metaclass(TypeclassBase, PlayerDB)):
         if session and protocol_flags:
             session.update_flags(**protocol_flags)
 
-        self._send_to_connect_channel("{G%s connected{n" % self.key)
+        # inform the client that we logged in through an OOB message
+        if session:
+            session.msg(logged_in={})
+
+        self._send_to_connect_channel("|G%s connected|n" % self.key)
         if _MULTISESSION_MODE == 0:
             # in this mode we should have only one character available. We
             # try to auto-connect to our last conneted object, if any
@@ -731,6 +748,9 @@ class DefaultPlayer(with_metaclass(TypeclassBase, PlayerDB)):
         elif _MULTISESSION_MODE in (2, 3):
             # In this mode we by default end up at a character selection
             # screen. We execute look on the player.
+            # we make sure to clean up the _playable_characers list in case
+            # any was deleted in the interim.
+            self.db._playable_characters = [char for char in self.db._playable_characters if char]
             self.msg(self.at_look(target=self.db._playable_characters,
                                   session=session))
 
@@ -755,7 +775,7 @@ class DefaultPlayer(with_metaclass(TypeclassBase, PlayerDB)):
 
         """
         reason = reason and "(%s)" % reason or ""
-        self._send_to_connect_channel("{R%s disconnected %s{n" % (self.key, reason))
+        self._send_to_connect_channel("|R%s disconnected %s|n" % (self.key, reason))
 
     def at_post_disconnect(self):
         """
@@ -816,42 +836,43 @@ class DefaultPlayer(with_metaclass(TypeclassBase, PlayerDB)):
         if target and not is_iter(target):
             # single target - just show it
             return target.return_appearance(self)
-        elif not target:
-            return "|rNo such character.|n"
         else:
             # list of targets - make list to disconnect from db
-            characters = list(target)
+            characters = list(tar for tar in target if tar) if target else []
             sessions = self.sessions.all()
             is_su = self.is_superuser
 
             # text shown when looking in the ooc area
-            string = "Account {g%s{n (you are Out-of-Character)" % (self.key)
+            result = ["Account |g%s|n (you are Out-of-Character)" % self.key]
 
             nsess = len(sessions)
-            string += nsess == 1 and "\n\n{wConnected session:{n" or "\n\n{wConnected sessions (%i):{n" % nsess
+            result.append(nsess == 1 and "\n\n|wConnected session:|n" or "\n\n|wConnected sessions (%i):|n" % nsess)
             for isess, sess in enumerate(sessions):
                 csessid = sess.sessid
-                addr = "%s (%s)" % (sess.protocol_key, isinstance(sess.address, tuple) and str(sess.address[0]) or str(sess.address))
-                string += "\n %s %s" % (session.sessid == csessid and "{w* %s{n" % (isess + 1) or "  %s" % (isess + 1), addr)
-            string += "\n\n {whelp{n - more commands"
-            string += "\n {wooc <Text>{n - talk on public channel"
+                addr = "%s (%s)" % (sess.protocol_key, isinstance(sess.address, tuple)
+                                    and str(sess.address[0]) or str(sess.address))
+                result.append("\n %s %s" % (session.sessid == csessid and "|w* %s|n" % (isess + 1)
+                                            or "  %s" % (isess + 1), addr))
+            result.append("\n\n |whelp|n - more commands")
+            result.append("\n |wooc <Text>|n - talk on public channel")
 
             charmax = _MAX_NR_CHARACTERS if _MULTISESSION_MODE > 1 else 1
 
             if is_su or len(characters) < charmax:
                 if not characters:
-                    string += "\n\n You don't have any characters yet. See {whelp @charcreate{n for creating one."
+                    result.append("\n\n You don't have any characters yet. See |whelp @charcreate|n for creating one.")
                 else:
-                    string += "\n {w@charcreate <name> [=description]{n - create new character"
+                    result.append("\n |w@charcreate <name> [=description]|n - create new character")
+                    result.append("\n |w@chardelete <name>|n - delete a character (cannot be undone!)")
 
             if characters:
                 string_s_ending = len(characters) > 1 and "s" or ""
-                string += "\n {w@ic <character>{n - enter the game ({w@ooc{n to get back here)"
+                result.append("\n |w@ic <character>|n - enter the game (|w@ooc|n to get back here)")
                 if is_su:
-                    string += "\n\nAvailable character%s (%i/unlimited):" % (string_s_ending, len(characters))
+                    result.append("\n\nAvailable character%s (%i/unlimited):" % (string_s_ending, len(characters)))
                 else:
-                    string += "\n\nAvailable character%s%s:"  % (string_s_ending,
-                             charmax > 1 and " (%i/%i)" % (len(characters), charmax) or "")
+                    result.append("\n\nAvailable character%s%s:"
+                                  % (string_s_ending, charmax > 1 and " (%i/%i)" % (len(characters), charmax) or ""))
 
                 for char in characters:
                     csessions = char.sessions.all()
@@ -860,14 +881,16 @@ class DefaultPlayer(with_metaclass(TypeclassBase, PlayerDB)):
                             # character is already puppeted
                             sid = sess in sessions and sessions.index(sess) + 1
                             if sess and sid:
-                                string += "\n - {G%s{n [%s] (played by you in session %i)" % (char.key, ", ".join(char.permissions.all()), sid)
+                                result.append("\n - |G%s|n [%s] (played by you in session %i)"
+                                              % (char.key, ", ".join(char.permissions.all()), sid))
                             else:
-                                string += "\n - {R%s{n [%s] (played by someone else)" % (char.key, ", ".join(char.permissions.all()))
+                                result.append("\n - |R%s|n [%s] (played by someone else)"
+                                              % (char.key, ", ".join(char.permissions.all())))
                     else:
                         # character is "free to puppet"
-                        string += "\n - %s [%s]" % (char.key, ", ".join(char.permissions.all()))
-            string = ("-" * 68) + "\n" + string + "\n" + ("-" * 68)
-            return string
+                        result.append("\n - %s [%s]" % (char.key, ", ".join(char.permissions.all())))
+            look_string = ("-" * 68) + "\n" + "".join(result) + "\n" + ("-" * 68)
+            return look_string
 
 
 class DefaultGuest(DefaultPlayer):
@@ -884,19 +907,8 @@ class DefaultGuest(DefaultPlayer):
             session (Session, optional): Session connecting.
 
         """
-        self._send_to_connect_channel("{G%s connected{n" % self.key)
+        self._send_to_connect_channel("|G%s connected|n" % self.key)
         self.puppet_object(session, self.db._last_puppet)
-
-    def at_disconnect(self):
-        """
-        A Guest's characters aren't meant to linger on the server.
-        When a Guest disconnects, we remove its character.
-
-        """
-        super(DefaultGuest, self).at_disconnect()
-        characters = self.db._playable_characters
-        for character in characters:
-            if character: character.delete()
 
     def at_server_shutdown(self):
         """
@@ -906,13 +918,17 @@ class DefaultGuest(DefaultPlayer):
         super(DefaultGuest, self).at_server_shutdown()
         characters = self.db._playable_characters
         for character in characters:
-            if character: character.delete()
+            if character:
+                print "deleting Character:", character
+                character.delete()
 
     def at_post_disconnect(self):
         """
-        Guests aren't meant to linger on the server, either. We need
-        to wait until after the Guest disconnects to delete it,
-        though.
+        Once having disconnected, destroy the guest's characters and
         """
         super(DefaultGuest, self).at_post_disconnect()
+        characters = self.db._playable_characters
+        for character in characters:
+            if character:
+                character.delete()
         self.delete()

@@ -50,11 +50,11 @@ _GA = object.__getattribute__
 
 #
 # Game Object creation
-#
 
-def create_object(typeclass=None, key=None, location=None,
-                  home=None, permissions=None, locks=None,
-                  aliases=None, tags=None, destination=None, report_to=None, nohome=False):
+
+def create_object(typeclass=None, key=None, location=None, home=None,
+                  permissions=None, locks=None, aliases=None, tags=None,
+                  destination=None, report_to=None, nohome=False):
     """
 
     Create a new in-game object.
@@ -110,30 +110,28 @@ def create_object(typeclass=None, key=None, location=None,
 
     # create new instance
     new_object = typeclass(db_key=key, db_location=location,
-                              db_destination=destination, db_home=home,
-                              db_typeclass_path=typeclass.path)
+                           db_destination=destination, db_home=home,
+                           db_typeclass_path=typeclass.path)
     # store the call signature for the signal
-    new_object._createdict = {"key":key, "location":location, "destination":destination,
-                              "home":home, "typeclass":typeclass.path, "permissions":permissions,
-                              "locks":locks, "aliases":aliases, "tags": tags, "destination":destination,
-                              "report_to":report_to, "nohome":nohome}
+    new_object._createdict = dict(key=key, location=location, destination=destination, home=home,
+                                  typeclass=typeclass.path, permissions=permissions, locks=locks,
+                                  aliases=aliases, tags=tags, report_to=report_to, nohome=nohome)
     # this will trigger the save signal which in turn calls the
     # at_first_save hook on the typeclass, where the _createdict can be
     # used.
     new_object.save()
     return new_object
 
-#alias for create_object
+# alias for create_object
 object = create_object
 
 
 #
 # Script creation
-#
 
 def create_script(typeclass=None, key=None, obj=None, player=None, locks=None,
                   interval=None, start_delay=None, repeats=None,
-                  persistent=None, autostart=True, report_to=None):
+                  persistent=None, autostart=True, report_to=None, desc=None):
     """
     Create a new script. All scripts are a combination of a database
     object that communicates with the database, and an typeclass that
@@ -162,6 +160,7 @@ def create_script(typeclass=None, key=None, obj=None, player=None, locks=None,
         autostart (bool): If this Script will start immediately when
             created or if the `start` method must be called explicitly.
         report_to (Object): The object to return error messages to.
+        desc (str): Optional description of script
 
 
     See evennia.scripts.manager for methods to manipulate existing
@@ -187,24 +186,22 @@ def create_script(typeclass=None, key=None, obj=None, player=None, locks=None,
     if start_delay: kwarg["db_start_delay"] = start_delay
     if repeats: kwarg["db_repeats"] = repeats
     if persistent: kwarg["db_persistent"] = persistent
+    if desc: kwarg["db_desc"] = desc
 
     # create new instance
     new_script = typeclass(**kwarg)
 
     # store the call signature for the signal
-    new_script._createdict = {"key":key, "obj":obj, "player":player,
-                              "locks":locks, "interval":interval,
-                              "start_delay":start_delay, "repeats":repeats,
-                              "persistent":persistent, "autostart":autostart,
-                              "report_to":report_to}
-
+    new_script._createdict = dict(key=key, obj=obj, player=player, locks=locks, interval=interval,
+                                  start_delay=start_delay, repeats=repeats, persistent=persistent,
+                                  autostart=autostart, report_to=report_to)
     # this will trigger the save signal which in turn calls the
     # at_first_save hook on the typeclass, where the _createdict
     # can be used.
     new_script.save()
     return new_script
 
-#alias
+# alias
 script = create_script
 
 
@@ -212,7 +209,7 @@ script = create_script
 # Help entry creation
 #
 
-def create_help_entry(key, entrytext, category="General", locks=None):
+def create_help_entry(key, entrytext, category="General", locks=None, aliases=None):
     """
     Create a static help entry in the help database. Note that Command
     help entries are dynamic and directly taken from the __doc__
@@ -225,6 +222,7 @@ def create_help_entry(key, entrytext, category="General", locks=None):
         entrytext (str): The body of te help entry
         category (str, optional): The help category of the entry.
         locks (str, optional): A lockstring to restrict access.
+        aliases (list of str): List of alternative (likely shorter) keynames.
 
     Returns:
         help (HelpEntry): A newly created help entry.
@@ -241,6 +239,8 @@ def create_help_entry(key, entrytext, category="General", locks=None):
         new_help.help_category = category
         if locks:
             new_help.locks.add(locks)
+        if aliases:
+            new_help.aliases.add(aliases)
         new_help.save()
         return new_help
     except IntegrityError:
@@ -256,10 +256,8 @@ help_entry = create_help_entry
 
 #
 # Comm system methods
-#
 
-def create_message(senderobj, message, channels=None,
-                   receivers=None, locks=None, header=None):
+def create_message(senderobj, message, channels=None, receivers=None, locks=None, header=None):
     """
     Create a new communication Msg. Msgs represent a unit of
     database-persistent communication between entites.
@@ -289,7 +287,7 @@ def create_message(senderobj, message, channels=None,
         from evennia.comms.models import Msg as _Msg
     if not message:
         # we don't allow empty messages.
-        return
+        return None
     new_message = _Msg(db_message=message)
     new_message.save()
     for sender in make_iter(senderobj):
@@ -321,7 +319,7 @@ def create_channel(key, aliases=None, desc=None,
         key (str): This must be unique.
 
     Kwargs:
-        aliases (list): List of alternative (likely shorter) keynames.
+        aliases (list of str): List of alternative (likely shorter) keynames.
         desc (str): A description of the channel, for use in listings.
         locks (str): Lockstring.
         keep_log (bool): Log channel throughput.
@@ -342,8 +340,7 @@ def create_channel(key, aliases=None, desc=None,
     new_channel = typeclass(db_key=key)
 
     # store call signature for the signal
-    new_channel._createdict = {"key":key, "aliases":aliases,
-            "desc":desc, "locks":locks, "keep_log":keep_log}
+    new_channel._createdict = dict(key=key, aliases=aliases, desc=desc, locks=locks, keep_log=keep_log)
 
     # this will trigger the save signal which in turn calls the
     # at_first_save hook on the typeclass, where the _createdict can be
@@ -354,10 +351,10 @@ def create_channel(key, aliases=None, desc=None,
 channel = create_channel
 
 
-
 #
 # Player creation methods
 #
+
 
 def create_player(key, email, password,
                   typeclass=None,
@@ -372,7 +369,7 @@ def create_player(key, email, password,
         key (str): The player's name. This should be unique.
         email (str): Email on valid addr@addr.domain form. This is
             technically required but if set to `None`, an email of
-            `dummy@dummy.com` will be used as a placeholder.
+            `dummy@example.com` will be used as a placeholder.
         password (str): Password in cleartext.
 
     Kwargs:
@@ -407,7 +404,7 @@ def create_player(key, email, password,
     # correctly when each object is recovered).
 
     if not email:
-        email = "dummy@dummy.com"
+        email = "dummy@example.com"
     if _PlayerDB.objects.filter(username__iexact=key):
         raise ValueError("A Player with the name '%s' already exists." % key)
 
@@ -422,8 +419,7 @@ def create_player(key, email, password,
                            is_staff=is_superuser, is_superuser=is_superuser,
                            last_login=now, date_joined=now)
     new_player.set_password(password)
-    new_player._createdict = {"locks":locks, "permissions":permissions,
-                              "report_to":report_to}
+    new_player._createdict = dict(locks=locks, permissions=permissions, report_to=report_to)
     # saving will trigger the signal that calls the
     # at_first_save hook on the typeclass, where the _createdict
     # can be used.

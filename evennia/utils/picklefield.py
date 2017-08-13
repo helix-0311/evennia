@@ -128,7 +128,7 @@ class PickledWidget(Textarea):
         final_attrs = self.build_attrs(attrs, name=name)
         return format_html('<textarea{0}>\r\n{1}</textarea>',
                            flatatt(final_attrs),
-                           force_text(value))
+                           value)
 
 
 class PickledFormField(CharField):
@@ -147,13 +147,20 @@ class PickledFormField(CharField):
         super(PickledFormField, self).__init__(*args, **kwargs)
 
     def clean(self, value):
-        if value == '':
-            # Field was left blank. Make this None.
+        try:
+            if not value.strip():
+                # Field was left blank. Make this None.
+                value = 'None'
+        except AttributeError:
             value = 'None'
         try:
             return literal_eval(value)
         except (ValueError, SyntaxError):
-            raise ValidationError(self.error_messages['invalid'])
+            try:
+                value = repr(value)
+                return literal_eval(value)
+            except (ValueError, SyntaxError):
+                raise ValidationError(self.error_messages['invalid'])
 
 
 class PickledObjectField(models.Field):
@@ -205,7 +212,7 @@ class PickledObjectField(models.Field):
         if value is not None:
             try:
                 value = dbsafe_decode(value, self.compress)
-            except:
+            except Exception:
                 # If the value is a definite pickle; and an error is raised in
                 # de-pickling it should be allowed to propogate.
                 if isinstance(value, PickledObject):

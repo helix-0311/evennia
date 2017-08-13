@@ -13,10 +13,10 @@ import time
 import sys
 import os
 
-from twisted.web import server, static
+from twisted.web import static
 from twisted.application import internet, service
 from twisted.internet import reactor, defer
-from twisted.internet.task import LoopingCall
+from twisted.internet.task import LoopingCall, deferLater
 
 import django
 django.setup()
@@ -38,6 +38,7 @@ from evennia.server.sessionhandler import SESSIONS
 
 _SA = object.__setattr__
 
+SERVER_PIDFILE = ""
 if os.name == 'nt':
     # For Windows we need to handle pid files manually.
     SERVER_PIDFILE = os.path.join(settings.GAME_DIR, "server", 'server.pid')
@@ -48,8 +49,14 @@ SERVER_RESTART = os.path.join(settings.GAME_DIR, "server", 'server.restart')
 # module containing hook methods called during start_stop
 SERVER_STARTSTOP_MODULE = mod_import(settings.AT_SERVER_STARTSTOP_MODULE)
 
-# module containing plugin services
+# modules containing plugin services
 SERVER_SERVICES_PLUGIN_MODULES = [mod_import(module) for module in make_iter(settings.SERVER_SERVICES_PLUGIN_MODULES)]
+try:
+    WEB_PLUGINS_MODULE = mod_import(settings.WEB_PLUGINS_MODULE)
+except ImportError:
+    WEB_PLUGINS_MODULE = None
+    print ("WARNING: settings.WEB_PLUGINS_MODULE not found - "
+           "copy 'evennia/game_template/server/conf/web_plugins.py to mygame/server/conf.")
 
 #------------------------------------------------------------
 # Evennia Server settings
@@ -70,7 +77,6 @@ GUEST_ENABLED = settings.GUEST_ENABLED
 
 # server-channel mappings
 WEBSERVER_ENABLED = settings.WEBSERVER_ENABLED and WEBSERVER_PORTS and WEBSERVER_INTERFACES
-IMC2_ENABLED = settings.IMC2_ENABLED
 IRC_ENABLED = settings.IRC_ENABLED
 RSS_ENABLED = settings.RSS_ENABLED
 WEBCLIENT_ENABLED = settings.WEBCLIENT_ENABLED
@@ -145,7 +151,8 @@ class Evennia(object):
         sys.path.insert(1, '.')
 
         # create a store of services
-        self.services = service.IServiceCollection(application)
+        self.services = service.MultiService()
+        self.services.setServiceParent(application)
         self.amp_protocol = None  # set by amp factory
         self.sessions = SESSIONS
         self.sessions.server = self
@@ -161,10 +168,21 @@ class Evennia(object):
         # initialize channelhandler
         channelhandler.CHANNELHANDLER.update()
 
-        # set a callback if the server is killed abruptly,
-        # by Ctrl-C, reboot etc.
-        reactor.addSystemEventTrigger('before', 'shutdown',
-                                          self.shutdown, _reactor_stopping=True)
+        # wrap the SIGINT handler to make sure we empty the threadpool
+        # even when we reload and we have long-running requests in queue.
+        # this is necessary over using Twisted's signal handler.
+        # (see https://github.com/evennia/evennia/issues/1128)
+        def _wrap_sigint_handler(*args):
+            from twisted.internet.defer import Deferred
+            if hasattr(self, "web_root"):
+                d = self.web_root.empty_threadpool()
+                d.addCallback(lambda _: self.shutdown(_reactor_stopping=True))
+            else:
+                d = Deferred(lambda _: self.shutdown(_reactor_stopping=True))
+            d.addCallback(lambda _: reactor.stop())
+            reactor.callLater(1, d.callback, None)
+        reactor.sigInt = _wrap_sigint_handler
+
         self.game_running = True
 
         # track the server time
@@ -273,17 +291,10 @@ class Evennia(object):
         [o.at_init() for o in ObjectDB.get_all_cached_instances()]
         [p.at_init() for p in PlayerDB.get_all_cached_instances()]
 
-        with open(SERVER_RESTART, 'r') as f:
-            mode = f.read()
-        if mode in ('True', 'reload'):
-            from evennia.scripts.monitorhandler import MONITOR_HANDLER
-            MONITOR_HANDLER.restore()
-
-        from evennia.scripts.tickerhandler import TICKER_HANDLER
-        TICKER_HANDLER.restore(mode in ('True', 'reload'))
+        mode = self.getset_restart_mode()
 
         # call correct server hook based on start file value
-        if mode in ('True', 'reload'):
+        if mode == 'reload':
             # True was the old reload flag, kept for compatibilty
             self.at_server_reload_start()
         elif mode == 'reset':
@@ -296,15 +307,19 @@ class Evennia(object):
         # always call this regardless of start type
         self.at_server_start()
 
-    def set_restart_mode(self, mode=None):
+    def getset_restart_mode(self, mode=None):
         """
         This manages the flag file that tells the runner if the server is
-        reloading, resetting or shutting down. Valid modes are
-          'reload', 'reset', 'shutdown' and None.
-        If mode is None, no change will be done to the flag file.
+        reloading, resetting or shutting down.
 
-        Either way, the active restart setting (Restart=True/False) is
-        returned so the server knows which more it's in.
+        Args:
+            mode (string or None, optional): Valid values are
+                'reload', 'reset', 'shutdown' and `None`. If mode is `None`,
+                no change will be done to the flag file.
+        Returns:
+            mode (str): The currently active restart mode, either just
+                set or previously set.
+
         """
         if mode is None:
             with open(SERVER_RESTART, 'r') as f:
@@ -338,11 +353,12 @@ class Evennia(object):
             # once; we don't need to run the shutdown procedure again.
             defer.returnValue(None)
 
-        mode = self.set_restart_mode(mode)
+        mode = self.getset_restart_mode(mode)
 
         from evennia.objects.models import ObjectDB
         #from evennia.players.models import PlayerDB
         from evennia.server.models import ServerConfig
+        from evennia.utils import gametime as _GAMETIME_MODULE
 
         if mode == 'reload':
             # call restart hooks
@@ -379,17 +395,20 @@ class Evennia(object):
         # always called, also for a reload
         self.at_server_stop()
 
-        # if _reactor_stopping is true, reactor does not need to
-        # be stopped again.
         if os.name == 'nt' and os.path.exists(SERVER_PIDFILE):
             # for Windows we need to remove pid files manually
             os.remove(SERVER_PIDFILE)
+
+        if hasattr(self, "web_root"): # not set very first start
+            yield self.web_root.empty_threadpool()
+
         if not _reactor_stopping:
-            # this will also send a reactor.stop signal, so we set a
-            # flag to avoid loops.
-            self.shutdown_complete = True
             # kill the server
-            reactor.callLater(0, reactor.stop)
+            self.shutdown_complete = True
+            reactor.callLater(1, reactor.stop)
+
+        # we make sure the proper gametime is saved as late as possible
+        ServerConfig.objects.conf("runtime", _GAMETIME_MODULE.runtime())
 
     # server start/stop hooks
 
@@ -418,6 +437,31 @@ class Evennia(object):
         if SERVER_STARTSTOP_MODULE:
             SERVER_STARTSTOP_MODULE.at_server_reload_start()
 
+    def at_post_portal_sync(self):
+        """
+        This is called just after the portal has finished syncing back data to the server
+        after reconnecting.
+        """
+        # one of reload, reset or shutdown
+        mode = self.getset_restart_mode()
+
+        from evennia.scripts.monitorhandler import MONITOR_HANDLER
+        MONITOR_HANDLER.restore(mode == 'reload')
+
+        from evennia.scripts.tickerhandler import TICKER_HANDLER
+        TICKER_HANDLER.restore(mode == 'reload')
+
+        # after sync is complete we force-validate all scripts
+        # (this also starts any that didn't yet start)
+        ScriptDB.objects.validate(init_mode=mode)
+
+        # start the task handler
+        from evennia.scripts.taskhandler import TASK_HANDLER
+        TASK_HANDLER.load()
+        TASK_HANDLER.create_delays()
+
+        # delete the temporary setting
+        ServerConfig.objects.conf("server_restart_mode", delete=True)
 
     def at_server_reload_stop(self):
         """
@@ -499,19 +543,26 @@ if WEBSERVER_ENABLED:
 
     # Start a django-compatible webserver.
 
-    from twisted.python import threadpool
-    from evennia.server.webserver import DjangoWebRoot, WSGIWebServer
+    #from twisted.python import threadpool
+    from evennia.server.webserver import DjangoWebRoot, WSGIWebServer, Website, LockableThreadPool
 
     # start a thread pool and define the root url (/) as a wsgi resource
     # recognized by Django
-    threads = threadpool.ThreadPool(minthreads=max(1, settings.WEBSERVER_THREADPOOL_LIMITS[0]),
+    threads = LockableThreadPool(minthreads=max(1, settings.WEBSERVER_THREADPOOL_LIMITS[0]),
                                     maxthreads=max(1, settings.WEBSERVER_THREADPOOL_LIMITS[1]))
+
     web_root = DjangoWebRoot(threads)
     # point our media resources to url /media
     web_root.putChild("media", static.File(settings.MEDIA_ROOT))
     # point our static resources to url /static
     web_root.putChild("static", static.File(settings.STATIC_ROOT))
-    web_site = server.Site(web_root, logPath=settings.HTTP_LOG_FILE)
+    EVENNIA.web_root = web_root
+
+    if WEB_PLUGINS_MODULE:
+        # custom overloads
+        web_root = WEB_PLUGINS_MODULE.at_webserver_root_creation(web_root)
+
+    web_site = Website(web_root, logPath=settings.HTTP_LOG_FILE)
 
     for proxyport, serverport in WEBSERVER_PORTS:
         # create the webserver (we only need the port for this)
@@ -525,10 +576,6 @@ ENABLED = []
 if IRC_ENABLED:
     # IRC channel connections
     ENABLED.append('irc')
-
-if IMC2_ENABLED:
-    # IMC2 channel connections
-    ENABLED.append('imc2')
 
 if RSS_ENABLED:
     # RSS feed channel connections

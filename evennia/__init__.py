@@ -2,12 +2,18 @@
 Evennia MUD/MUX/MU* creation system
 
 This is the main top-level API for Evennia. You can also explore the
-evennia library by accessing evennia.<subpackage> directly.
+evennia library by accessing evennia.<subpackage> directly. From
+inside the game you can read docs of all object by viewing its
+`__doc__` string, such as through
 
-For full functionality you need to explore this module via a django-
-aware shell. Go to your game directory and use the command 'evennia.py shell'
+    @py evennia.ObjectDB.__doc__
+
+For full functionality you should explore this module via a django-
+aware shell. Go to your game directory and use the command
+
+   evennia shell
+
 to launch such a shell (using python or ipython depending on your install).
-
 See www.evennia.com for full documentation.
 
 """
@@ -40,12 +46,14 @@ Command = None
 CmdSet = None
 default_cmds = None
 syscmdkeys = None
+InterruptCommand = None
 
 # search functions
 search_object = None
 search_script = None
 search_player = None
 search_channel = None
+search_message = None
 search_help = None
 search_tag = None
 
@@ -67,9 +75,14 @@ ansi = None
 spawn = None
 managers = None
 contrib = None
+EvMenu = None
+EvTable = None
+EvForm = None
+EvEditor = None
 
 # Handlers
 SESSION_HANDLER = None
+TASK_HANDLER = None
 TICKER_HANDLER = None
 MONITOR_HANDLER = None
 CHANNEL_HANDLER = None
@@ -92,6 +105,7 @@ def _create_version():
     try:
         version = "%s (rev %s)" % (version, check_output("git rev-parse --short HEAD", shell=True, cwd=root, stderr=STDOUT).strip())
     except (IOError, CalledProcessError):
+        # ignore if we cannot get to git
         pass
     return version
 
@@ -104,21 +118,14 @@ def _init():
     Evennia has fully initialized all its models. It sets up the API
     in a safe environment where all models are available already.
     """
-    def imp(path, variable=True):
-        "Helper function"
-        mod, fromlist = path, "None"
-        if variable:
-            mod, fromlist = path.rsplit('.', 1)
-        return __import__(mod, fromlist=[fromlist])
-
     global DefaultPlayer, DefaultObject, DefaultGuest, DefaultCharacter
     global DefaultRoom, DefaultExit, DefaultChannel, DefaultScript
     global ObjectDB, PlayerDB, ScriptDB, ChannelDB, Msg
-    global Command, CmdSet, default_cmds, syscmdkeys
+    global Command, CmdSet, default_cmds, syscmdkeys, InterruptCommand
     global search_object, search_script, search_player, search_channel, search_help, search_tag
     global create_object, create_script, create_player, create_channel, create_message, create_help_entry
     global settings,lockfuncs, logger, utils, gametime, ansi, spawn, managers
-    global contrib, TICKER_HANDLER, MONITOR_HANDLER, SESSION_HANDLER, CHANNEL_HANDLER
+    global contrib, TICKER_HANDLER, MONITOR_HANDLER, SESSION_HANDLER, CHANNEL_HANDLER, TASK_HANDLER
 
     from .players.players import DefaultPlayer
     from .players.players import DefaultGuest
@@ -137,13 +144,14 @@ def _init():
     from .comms.models import Msg
 
     # commands
-    from .commands.command import Command
+    from .commands.command import Command, InterruptCommand
     from .commands.cmdset import CmdSet
 
     # search functions
     from .utils.search import search_object
     from .utils.search import search_script
     from .utils.search import search_player
+    from .utils.search import search_message
     from .utils.search import search_channel
     from .utils.search import search_help
     from .utils.search import search_tag
@@ -164,9 +172,14 @@ def _init():
     from .utils import ansi
     from .utils.spawner import spawn
     from . import contrib
+    from .utils.evmenu import EvMenu
+    from .utils.evtable import EvTable
+    from .utils.evform import EvForm
+    from .utils.eveditor import EvEditor
 
     # handlers
     from .scripts.tickerhandler import TICKER_HANDLER
+    from .scripts.taskhandler import TASK_HANDLER
     from .server.sessionhandler import SESSION_HANDLER
     from .comms.channelhandler import CHANNEL_HANDLER
     from .scripts.monitorhandler import MONITOR_HANDLER
@@ -246,9 +259,9 @@ def _init():
 
         def __init__(self):
             "populate the object with commands"
-
             def add_cmds(module):
                 "helper method for populating this object with cmds"
+                from evennia.utils import utils
                 cmdlist = utils.variable_from_module(module, module.__all__)
                 self.__dict__.update(dict([(c.__name__, c) for c in cmdlist]))
 

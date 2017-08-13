@@ -2,13 +2,13 @@
 Base typeclass for in-game Channels.
 
 """
-
 from evennia.typeclasses.models import TypeclassBase
 from evennia.comms.models import TempMsg, ChannelDB
 from evennia.comms.managers import ChannelManager
 from evennia.utils import logger
 from evennia.utils.utils import make_iter
 from future.utils import with_metaclass
+_CHANNEL_HANDLER = None
 
 
 class DefaultChannel(with_metaclass(TypeclassBase, ChannelDB)):
@@ -51,7 +51,12 @@ class DefaultChannel(with_metaclass(TypeclassBase, ChannelDB)):
         Called once, when the channel is first created.
 
         """
-        pass
+        # delayed import of the channelhandler
+        global _CHANNEL_HANDLER
+        if not _CHANNEL_HANDLER:
+            from evennia.comms.channelhandler import CHANNEL_HANDLER as _CHANNEL_HANDLER
+        # register ourselves with the channelhandler.
+        _CHANNEL_HANDLER.add(self)
 
     # helper methods, for easy overloading
 
@@ -79,6 +84,46 @@ class DefaultChannel(with_metaclass(TypeclassBase, ChannelDB)):
             has_sub = self.subscriptions.has(subscriber.player)
         return has_sub
 
+    @property
+    def mutelist(self):
+        return self.db.mute_list or []
+
+    @property
+    def wholist(self):
+        subs = self.subscriptions.all()
+        listening = [ob for ob in subs if ob.is_connected and ob not in self.mutelist]
+        if subs:
+            # display listening subscribers in bold
+            string = ", ".join([player.key if player not in listening else "|w%s|n" % player.key for player in subs])
+        else:
+            string = "<None>"
+        return string
+
+    def mute(self, subscriber):
+        """
+        Adds an entity to the list of muted subscribers.
+        A muted subscriber will no longer see channel messages,
+        but may use channel commands.
+        """
+        mutelist = self.mutelist
+        if subscriber not in mutelist:
+            mutelist.append(subscriber)
+            self.db.mute_list = mutelist
+            return True
+        return False
+
+    def unmute(self, subscriber):
+        """
+        Removes an entity to the list of muted subscribers.
+        A muted subscriber will no longer see channel messages,
+        but may use channel commands.
+        """
+        mutelist = self.mutelist
+        if subscriber in mutelist:
+            mutelist.remove(subscriber)
+            self.db.mute_list = mutelist
+            return True
+        return False
 
     def connect(self, subscriber):
         """
@@ -102,6 +147,8 @@ class DefaultChannel(with_metaclass(TypeclassBase, ChannelDB)):
             return False
         # subscribe
         self.subscriptions.add(subscriber)
+        # unmute
+        self.unmute(subscriber)
         # post-join hook
         self.post_join_channel(subscriber)
         return True
@@ -125,6 +172,8 @@ class DefaultChannel(with_metaclass(TypeclassBase, ChannelDB)):
             return False
         # disconnect
         self.subscriptions.remove(subscriber)
+        # unmute
+        self.unmute(subscriber)
         # post-disconnect hook
         self.post_leave_channel(subscriber)
         return True
@@ -158,13 +207,13 @@ class DefaultChannel(with_metaclass(TypeclassBase, ChannelDB)):
         from evennia.comms.channelhandler import CHANNELHANDLER
         CHANNELHANDLER.update()
 
-    def message_transform(self, msg, emit=False, prefix=True,
+    def message_transform(self, msgobj, emit=False, prefix=True,
                           sender_strings=None, external=False):
         """
         Generates the formatted string sent to listeners on a channel.
 
         Args:
-            msg (str): Message to send.
+            msgobj (Msg): Message object to send.
             emit (bool, optional): In emit mode the message is not associated
                 with a specific sender name.
             prefix (bool, optional): Prefix `msg` with a text given by `self.channel_prefix`.
@@ -173,13 +222,13 @@ class DefaultChannel(with_metaclass(TypeclassBase, ChannelDB)):
 
         """
         if sender_strings or external:
-            body = self.format_external(msg, sender_strings, emit=emit)
+            body = self.format_external(msgobj, sender_strings, emit=emit)
         else:
-            body = self.format_message(msg, emit=emit)
+            body = self.format_message(msgobj, emit=emit)
         if prefix:
-            body = "%s%s" % (self.channel_prefix(msg, emit=emit), body)
-        msg.message = body
-        return msg
+            body = "%s%s" % (self.channel_prefix(msgobj, emit=emit), body)
+        msgobj.message = body
+        return msgobj
 
     def distribute_message(self, msgobj, online=False):
         """
@@ -189,18 +238,24 @@ class DefaultChannel(with_metaclass(TypeclassBase, ChannelDB)):
         Args:
             msgobj (Msg or TempMsg): Message to distribute.
             online (bool): Only send to receivers who are actually online
-                (not currently used):
 
         Notes:
             This is also where logging happens, if enabled.
 
         """
-        # get all players connected to this channel and send to them
-        for entity in self.subscriptions.all():
+        # get all players or objects connected to this channel and send to them
+        if online:
+            subs = self.subscriptions.online()
+        else:
+            subs = self.subscriptions.all()
+        for entity in subs:
+            # if the entity is muted, we don't send them a message
+            if entity in self.mutelist:
+                continue
             try:
                 # note our addition of the from_channel keyword here. This could be checked
                 # by a custom player.msg() to treat channel-receives differently.
-                entity.msg(msgobj.message, from_obj=msgobj.senders, options={"from_channel":self.id})
+                entity.msg(msgobj.message, from_obj=msgobj.senders, options={"from_channel": self.id})
             except AttributeError as e:
                 logger.log_trace("%s\nCannot send msg to '%s'." % (e, entity))
 
@@ -277,7 +332,6 @@ class DefaultChannel(with_metaclass(TypeclassBase, ChannelDB)):
         """
         self.msg(message, senders=senders, header=header, keep_log=False)
 
-
     # hooks
 
     def channel_prefix(self, msg=None, emit=False):
@@ -288,13 +342,13 @@ class DefaultChannel(with_metaclass(TypeclassBase, ChannelDB)):
         Args:
             msg (str, optional): Prefix text
             emit (bool, optional): Switches to emit mode, which usually
-                means to ignore any sender information. Not used by default.
+                means to not prefix the channel's info.
 
         Returns:
             prefix (str): The created channel prefix.
 
         """
-        return '[%s] ' % self.key
+        return '' if emit else '[%s] ' % self.key
 
     def format_senders(self, senders=None):
         """
@@ -322,7 +376,7 @@ class DefaultChannel(with_metaclass(TypeclassBase, ChannelDB)):
         message accordingly.
 
         Args:
-            msgob (Msg or TempMsg): The message to analyze for a pose.
+            msgobj (Msg or TempMsg): The message to analyze for a pose.
             sender_string (str): The name of the sender/poser.
 
         Returns:
@@ -372,7 +426,7 @@ class DefaultChannel(with_metaclass(TypeclassBase, ChannelDB)):
         Hook method. Formats a message body for display.
 
         Args:
-            msgob (Msg or TempMsg): The message object to send.
+            msgobj (Msg or TempMsg): The message object to send.
             emit (bool, optional): The message is agnostic of senders.
 
         Returns:
@@ -421,7 +475,7 @@ class DefaultChannel(with_metaclass(TypeclassBase, ChannelDB)):
         value, leaving the channel will be aborted.
 
         Args:
-            joiner (object): The joining object.
+            leaver (object): The leaving object.
 
         Returns:
             should_leave (bool): If `False`, channel parting is aborted.
@@ -434,7 +488,7 @@ class DefaultChannel(with_metaclass(TypeclassBase, ChannelDB)):
         Hook method. Runs right after an object or player leaves a channel.
 
         Args:
-            joiner (object): The joining object.
+            leaver (object): The leaving object.
 
         """
         pass

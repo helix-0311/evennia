@@ -91,7 +91,7 @@ class PlayerDB(TypedObject, AbstractUser):
     db_cmdset_storage = models.CharField('cmdset', max_length=255, null=True,
         help_text="optional python path to a cmdset class. If creating a Character, this will default to settings.CMDSET_CHARACTER.")
     # marks if this is a "virtual" bot player object
-    db_is_bot = models.BooleanField(default=False, verbose_name="is_bot", help_text="Used to identify irc/imc2/rss bots")
+    db_is_bot = models.BooleanField(default=False, verbose_name="is_bot", help_text="Used to identify irc/rss bots")
 
     # Database manager
     objects = PlayerDBManager()
@@ -103,17 +103,6 @@ class PlayerDB(TypedObject, AbstractUser):
 
     class Meta(object):
         verbose_name = 'Player'
-
-    # alias to the objs property
-    def __characters_get(self):
-        return self.objs
-
-    def __characters_set(self, value):
-        self.objs = value
-
-    def __characters_del(self):
-        raise Exception("Cannot delete name")
-    characters = property(__characters_get, __characters_set, __characters_del)
 
     # cmdset_storage property
     # This seems very sensitive to caching, so leaving it be for now /Griatch

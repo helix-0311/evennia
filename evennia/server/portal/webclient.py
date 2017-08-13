@@ -5,26 +5,13 @@ This implements a webclient with WebSockets (http://en.wikipedia.org/wiki/WebSoc
 by use of the txws implementation (https://github.com/MostAwesomeDude/txWS). It is
 used together with evennia/web/media/javascript/evennia_websocket_webclient.js.
 
-Thanks to Ricard Pillosu whose Evennia plugin inspired this module.
+All data coming into the webclient is in the form of valid JSON on the form
 
-Communication over the websocket interface is done with normal text
-communication. A special case is OOB-style communication; to do this
-the client must send data on the following form:
+`["inputfunc_name", [args], {kwarg}]`
 
-    OOB{"func1":[args], "func2":[args], ...}
-
-where the dict is JSON encoded. The initial OOB-prefix is used to
-identify this type of communication, all other data is considered
-plain text (command input).
-
-Example of call from a javascript client:
-
-    var websocket = new WebSocket("ws://localhost:8021");
-    var msg1 = "WebSocket Test";
-    websocket.send(msg1);
-    var msg2 = JSON.stringify({ testfunc: [[1, 2, 3], { kwarg: "val" }] });
-    websocket.send("OOB" + msg2);
-    websocket.close();
+which represents an "inputfunc" to be called on the Evennia side with *args, **kwargs.
+The most common inputfunc is "text", which takes just the text input
+from the command line and interprets it as an Evennia Command: `["text", ["look"], {}]`
 
 """
 import re
@@ -62,13 +49,19 @@ class WebSocketClient(Protocol, Session):
 
         """
 
-        self.csessid = self.transport.location.split("?", 1)[1]
-        csession = _CLIENT_SESSIONS(session_key=self.csessid)
-        uid = csession and csession.get("logged_in", False)
-        if uid:
-            # the client session is already logged in.
-            self.uid = uid
-            self.logged_in = True
+        try:
+            self.csessid = self.transport.location.split("?", 1)[1]
+        except IndexError:
+            # this may happen for custom webclients not caring for the
+            # browser session.
+            self.csessid = None
+        if self.csessid:
+            csession = _CLIENT_SESSIONS(session_key=self.csessid)
+            uid = csession and csession.get("logged_in", False)
+            if uid:
+                # the client session is already logged in.
+                self.uid = uid
+                self.logged_in = True
 
         # watch for dead links
         self.transport.setTcpKeepAlive(1)
@@ -99,7 +92,6 @@ class WebSocketClient(Protocol, Session):
         """
         self.sessionhandler.disconnect(self)
         self.transport.close()
-
 
     def dataReceived(self, string):
         """
@@ -172,7 +164,7 @@ class WebSocketClient(Protocol, Session):
         Kwargs:
             options (dict): Options-dict with the following keys understood:
                 - raw (bool): No parsing at all (leave ansi-to-html markers unparsed).
-                - nomarkup (bool): Clean out all ansi/html markers and tokens.
+                - nocolor (bool): Clean out all color.
                 - screenreader (bool): Use Screenreader mode.
                 - send_prompt (bool): Send a prompt with parsed html
 
@@ -190,7 +182,7 @@ class WebSocketClient(Protocol, Session):
 
         options = kwargs.pop("options", {})
         raw = options.get("raw", flags.get("RAW", False))
-        nomarkup = options.get("nomarkup", flags.get("NOMARKUP", False))
+        nocolor = options.get("nocolor", flags.get("NOCOLOR", False))
         screenreader = options.get("screenreader", flags.get("SCREENREADER", False))
         prompt = options.get("send_prompt", False)
 
@@ -202,7 +194,7 @@ class WebSocketClient(Protocol, Session):
         if raw:
             args[0] = text
         else:
-            args[0] = parse_html(text, strip_ansi=nomarkup)
+            args[0] = parse_html(text, strip_ansi=nocolor)
 
         # send to client on required form [cmdname, args, kwargs]
         self.sendLine(json.dumps([cmd, args, kwargs]))
@@ -212,7 +204,7 @@ class WebSocketClient(Protocol, Session):
         kwargs["options"].update({"send_prompt": True})
         self.send_text(*args, **kwargs)
 
-    def send_default(session, cmdname, *args, **kwargs):
+    def send_default(self, cmdname, *args, **kwargs):
         """
         Data Evennia -> User.
 
@@ -227,4 +219,4 @@ class WebSocketClient(Protocol, Session):
 
         """
         if not cmdname == "options":
-            session.sendLine(json.dumps([cmdname, args, kwargs]))
+            self.sendLine(json.dumps([cmdname, args, kwargs]))

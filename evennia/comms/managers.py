@@ -31,13 +31,13 @@ class CommError(Exception):
 # helper functions
 #
 
-def dbref(dbref, reqhash=True):
+def dbref(inp, reqhash=True):
     """
     Valid forms of dbref (database reference number) are either a
     string '#N' or an integer N.
 
     Args:
-        dbref (int or str): A possible dbref to check syntactically.
+        inp (int or str): A possible dbref to check syntactically.
         reqhash (bool): Require an initial hash `#` to accept.
 
     Returns:
@@ -45,16 +45,16 @@ def dbref(dbref, reqhash=True):
             dbref, otherwise `None`.
 
     """
-    if reqhash and not (isinstance(dbref, basestring) and dbref.startswith("#")):
+    if reqhash and not (isinstance(inp, basestring) and inp.startswith("#")):
         return None
-    if isinstance(dbref, basestring):
-        dbref = dbref.lstrip('#')
+    if isinstance(inp, basestring):
+        inp = inp.lstrip('#')
     try:
-        if int(dbref) < 0:
+        if int(inp) < 0:
             return None
     except Exception:
         return None
-    return dbref
+    return inp
 
 
 def identify_object(inp):
@@ -128,12 +128,14 @@ def to_object(inp, objtype='player'):
             return _ChannelDB.objects.get(id=obj)
         logger.log_err("%s %s %s %s %s", objtype, inp, obj, typ, type(inp))
         raise CommError()
+    # an unknown
+    return None
 
 #
 # Msg manager
 #
 
-class MsgManager(models.Manager):
+class MsgManager(TypedObjectManager):
     """
     This MsgManager implements methods for searching and manipulating
     Messages directly from the database.
@@ -253,7 +255,7 @@ class MsgManager(models.Manager):
         """
         return self.filter(db_receivers_channels=channel).exclude(db_hide_from_channels=channel)
 
-    def message_search(self, sender=None, receiver=None, freetext=None, dbref=None):
+    def search_message(self, sender=None, receiver=None, freetext=None, dbref=None):
         """
         Search the message database for particular messages. At least
         one of the arguments must be given to do a search.
@@ -309,7 +311,8 @@ class MsgManager(models.Manager):
             fulltext_restrict = Q()
         # execute the query
         return list(self.filter(sender_restrict & receiver_restrict & fulltext_restrict))
-
+    # back-compatibility alias
+    message_search = search_message
 
 #
 # Channel manager
@@ -383,7 +386,7 @@ class ChannelDBManager(TypedObjectManager):
         return []
 
     @returns_typeclass_list
-    def channel_search(self, ostring, exact=True):
+    def search_channel(self, ostring, exact=True):
         """
         Search the channel database for a particular channel.
 
@@ -400,6 +403,7 @@ class ChannelDBManager(TypedObjectManager):
             dbref = int(ostring.strip('#'))
             channels = self.filter(id=dbref)
         except Exception:
+            # Usually because we couldn't convert to int - not a dbref
             pass
         if not channels:
             # no id match. Search on the key.
@@ -413,6 +417,8 @@ class ChannelDBManager(TypedObjectManager):
                         if ostring.lower() in [a.lower
                             for a in channel.aliases.all()]]
         return channels
+    # back-compatibility alias
+    channel_search = search_channel
 
 class ChannelManager(ChannelDBManager, TypeclassManager):
     """

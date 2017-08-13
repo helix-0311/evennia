@@ -46,9 +46,9 @@ HelpEntry = ContentType.objects.get(app_label="help", model="helpentry").model_c
 Tag = ContentType.objects.get(app_label="typeclasses", model="tag").model_class()
 
 
-#------------------------------------------------------------------
+# -------------------------------------------------------------------
 # Search manager-wrappers
-#------------------------------------------------------------------
+# -------------------------------------------------------------------
 
 #
 # Search objects as a character
@@ -101,13 +101,13 @@ objects = search_objects
 #
 # Search for players
 #
-# def player_search(self, ostring):
-#     """
+# player_search(self, ostring)
+
 #     Searches for a particular player by name or
 #     database id.
 #
 #     ostring = a string or database id.
-#     """
+#
 
 search_player = PlayerDB.objects.player_search
 search_players = search_player
@@ -117,15 +117,15 @@ players = search_players
 #
 #   Searching for scripts
 #
-# def script_search(self, ostring, obj=None, only_timed=False):
-#     """
+# script_search(self, ostring, obj=None, only_timed=False)
+#
 #     Search for a particular script.
 #
 #     ostring - search criterion - a script ID or key
 #     obj - limit search to scripts defined on this object
 #     only_timed - limit search only to scripts that run
 #                  on a timer.
-#     """
+#
 
 search_script = ScriptDB.objects.script_search
 search_scripts = search_script
@@ -135,8 +135,8 @@ scripts = search_scripts
 # Searching for communication messages
 #
 #
-# def message_search(self, sender=None, receiver=None, channel=None, freetext=None):
-#     """
+# message_search(self, sender=None, receiver=None, channel=None, freetext=None)
+#
 #     Search the message database for particular messages. At least one
 #     of the arguments must be given to do a search.
 #
@@ -146,7 +146,7 @@ scripts = search_scripts
 #     freetext - Search for a text string in a message.
 #                NOTE: This can potentially be slow, so make sure to supply
 #                one of the other arguments to limit the search.
-#     """
+#
 
 search_message = Msg.objects.message_search
 search_messages = search_message
@@ -156,13 +156,13 @@ messages = search_messages
 #
 # Search for Communication Channels
 #
-# def channel_search(self, ostring)
-#     """
+# channel_search(self, ostring)
+#
 #     Search the channel database for a particular channel.
 #
 #     ostring - the key or database id of the channel.
 #     exact -  requires an exact ostring match (not case sensitive)
-#     """
+#
 
 search_channel = Channel.objects.channel_search
 search_channels = search_channel
@@ -172,13 +172,13 @@ channels = search_channels
 #
 # Find help entry objects.
 #
-# def search_help(self, ostring, help_category=None):
-#     """
+# search_help(self, ostring, help_category=None)
+#
 #     Retrieve a search entry object.
 #
 #     ostring - the help topic to look for
 #     category - limit the search to a particular help topic
-#     """
+#
 
 search_help = HelpEntry.objects.search_help
 search_help_entry = search_help
@@ -199,10 +199,16 @@ help_entries = search_help
 
 def search_object_attribute(key=None, category=None, value=None, strvalue=None):
     return ObjectDB.objects.get_by_attribute(key=key, category=category, value=value, strvalue=strvalue)
+
+
 def search_player_attribute(key=None, category=None, value=None, strvalue=None):
     return PlayerDB.objects.get_by_attribute(key=key, category=category, value=value, strvalue=strvalue)
+
+
 def search_script_attribute(key=None, category=None, value=None, strvalue=None):
     return ScriptDB.objects.get_by_attribute(key=key, category=category, value=value, strvalue=strvalue)
+
+
 def search_channel_attribute(key=None, category=None, value=None, strvalue=None):
     return Channel.objects.get_by_attribute(key=key, category=category, value=value, strvalue=strvalue)
 
@@ -218,17 +224,83 @@ search_attribute_object = ObjectDB.objects.get_attribute
 
 # Note that this returns the object attached to the tag, not the tag
 # object itself (this is usually what you want)
-def search_object_tag(key=None, category=None):
+
+
+def search_object_by_tag(key=None, category=None):
+    """
+    Find object based on tag or category.
+
+    Args:
+        key (str, optional): The tag key to search for.
+        category (str, optional): The category of tag
+            to search for. If not set, uncategorized
+            tags will be searched.
+
+    Returns:
+        matches (list): List of Objects with tags matching
+            the search criteria, or an empty list if no
+            matches were found.
+
+    """
     return ObjectDB.objects.get_by_tag(key=key, category=category)
-search_tag = search_object_tag # this is the most common case
+search_tag = search_object_by_tag  # this is the most common case
+
+
 def search_player_tag(key=None, category=None):
+    """
+    Find player based on tag or category.
+
+    Args:
+        key (str, optional): The tag key to search for.
+        category (str, optional): The category of tag
+            to search for. If not set, uncategorized
+            tags will be searched.
+
+    Returns:
+        matches (list): List of Players with tags matching
+            the search criteria, or an empty list if no
+            matches were found.
+
+    """
     return PlayerDB.objects.get_by_tag(key=key, category=category)
+
+
 def search_script_tag(key=None, category=None):
+    """
+    Find script based on tag or category.
+
+    Args:
+        key (str, optional): The tag key to search for.
+        category (str, optional): The category of tag
+            to search for. If not set, uncategorized
+            tags will be searched.
+
+    Returns:
+        matches (list): List of Scripts with tags matching
+            the search criteria, or an empty list if no
+            matches were found.
+
+    """
     return ScriptDB.objects.get_by_tag(key=key, category=category)
+
+
 def search_channel_tag(key=None, category=None):
+    """
+    Find channel based on tag or category.
+
+    Args:
+        key (str, optional): The tag key to search for.
+        category (str, optional): The category of tag
+            to search for. If not set, uncategorized
+            tags will be searched.
+
+    Returns:
+        matches (list): List of Channels with tags matching
+            the search criteria, or an empty list if no
+            matches were found.
+
+    """
     return Channel.objects.get_by_tag(key=key, category=category)
 
-# search for tag objects
+# search for tag objects (not the objects they are attached to
 search_tag_object = ObjectDB.objects.get_tag
-
-

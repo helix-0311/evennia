@@ -173,6 +173,7 @@ class PlayerTagInline(TagInline):
 
     """
     model = PlayerDB.db_tags.through
+    related_field = "playerdb"
 
 
 class PlayerAttributeInline(AttributeInline):
@@ -181,6 +182,7 @@ class PlayerAttributeInline(AttributeInline):
 
     """
     model = PlayerDB.db_attributes.through
+    related_field = "playerdb"
 
 
 class PlayerDBAdmin(BaseUserAdmin):
@@ -239,27 +241,15 @@ class PlayerDBAdmin(BaseUserAdmin):
         obj.save()
         if not change:
             #calling hooks for new player
-            ply = obj
-            ply.basetype_setup()
-            ply.at_player_creation()
+            obj.set_class_from_typeclass(typeclass_path=settings.BASE_PLAYER_TYPECLASS)
+            obj.basetype_setup()
+            obj.at_player_creation()
 
-    ## TODO! Remove User reference!
-    #def save_formset(self, request, form, formset, change):
-    #    """
-    #    Run all hooks on the player object
-    #    """
-    #    super(PlayerDBAdmin, self).save_formset(request, form, formset, change)
-    #    userobj = form.instance
-    #    userobj.name = userobj.username
-    #    if not change:
-    #        # uname, passwd, email = str(request.POST.get(u"username")), \
-    #        #     str(request.POST.get(u"password1")), \
-    #        #     str(request.POST.get(u"email"))
-    #        typeclass = str(request.POST.get(
-    #            u"playerdb_set-0-db_typeclass_path"))
-    #        create.create_player("", "", "",
-    #                             user=userobj,
-    #                             typeclass=typeclass,
-    #                             player_dbobj=userobj)
+    def response_add(self, request, obj, post_url_continue=None):
+        from django.http import HttpResponseRedirect
+        from django.core.urlresolvers import reverse
+        if '_continue' in request.POST:
+            return HttpResponseRedirect(reverse("admin:players_playerdb_change", args=[obj.id]))
+        return HttpResponseRedirect(reverse("admin:players_playerdb_change", args=[obj.id]))
 
 admin.site.register(PlayerDB, PlayerDBAdmin)

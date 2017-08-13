@@ -93,14 +93,6 @@ SSL_ENABLED = False
 SSL_PORTS = [4001]
 # Interface addresses to listen to. If 0.0.0.0, listen to all. Use :: for IPv6.
 SSL_INTERFACES = ['0.0.0.0']
-# Activate custom websocket support. This is unrelated to the websocket client!
-# This is intended to be used by optional third-party connections/applications
-# or clients.
-WEBSOCKET_ENABLED = False
-# Ports to use for Websockets
-WEBSOCKET_PORTS = [8021]
-# Interface addresses to listen to. If 0.0.0.0, listen to all. Use :: for IPv6.
-WEBSOCKET_INTERFACES = ['0.0.0.0']
 # This determine's whether Evennia's custom admin page is used, or if the
 # standard Django admin is used.
 EVENNIA_ADMIN = True
@@ -108,7 +100,7 @@ EVENNIA_ADMIN = True
 EVENNIA_DIR = os.path.dirname(os.path.abspath(__file__))
 # Path to the game directory (containing the server/conf/settings.py file)
 # This is dynamically created- there is generally no need to change this!
-if sys.argv[1] == 'test' if len(sys.argv)>1 else False:
+if sys.argv[1] == 'test' if len(sys.argv) > 1 else False:
     # unittesting mode
     GAME_DIR = os.getcwd()
 else:
@@ -127,10 +119,16 @@ LOG_DIR = os.path.join(GAME_DIR, 'server', 'logs')
 SERVER_LOG_FILE = os.path.join(LOG_DIR, 'server.log')
 PORTAL_LOG_FILE = os.path.join(LOG_DIR, 'portal.log')
 HTTP_LOG_FILE = os.path.join(LOG_DIR, 'http_requests.log')
+# if this is set to the empty string, lockwarnings will be turned off.
+LOCKWARNING_LOG_FILE = os.path.join(LOG_DIR, 'lockwarnings.log')
 # Rotate log files when server and/or portal stops. This will keep log
 # file sizes down. Turn off to get ever growing log files and never
 # loose log info.
 CYCLE_LOGFILES = True
+# Number of lines to append to rotating channel logs when they rotate
+CHANNEL_LOG_NUM_TAIL_LINES = 20
+# Max size of channel log files before they rotate
+CHANNEL_LOG_ROTATE_SIZE = 1000000
 # Local time zone for this installation. All choices can be found here:
 # http://www.postgresql.org/docs/8.0/interactive/datetime-keywords.html#DATETIME-TIMEZONE-SET-TABLE
 TIME_ZONE = 'UTC'
@@ -146,7 +144,7 @@ LANGUAGE_CODE = 'en-us'
 # out. This can be set as big as desired. A user may avoid being
 # thrown off by sending the empty system command 'idle' to the server
 # at regular intervals. Set <=0 to deactivate idle timeout completely.
-IDLE_TIMEOUT = 3600
+IDLE_TIMEOUT = -1
 # The idle command can be sent to keep your session active without actually
 # having to spam normal commands regularly. It gives no feedback, only updates
 # the idle timer. Note that "idle" will *always* work, even if a different
@@ -208,12 +206,19 @@ MAX_CONNECTION_RATE = 2
 # from the client! To turn the limiter off, set to <= 0.
 MAX_COMMAND_RATE = 80
 # The warning to echo back to users if they send commands too fast
-COMMAND_RATE_WARNING ="You entered commands too fast. Wait a moment and try again."
+COMMAND_RATE_WARNING = "You entered commands too fast. Wait a moment and try again."
+# Determine how large of a string can be sent to the server in number
+# of characters. If they attempt to enter a string over this character
+# limit, we stop them and send a message. To make unlimited, set to
+# 0 or less.
+MAX_CHAR_LIMIT = 6000
+# The warning to echo back to users if they enter a very large string
+MAX_CHAR_LIMIT_WARNING = "You entered a string that was too long. Please break it up into multiple parts."
 # If this is true, errors and tracebacks from the engine will be
 # echoed as text in-game as well as to the log. This can speed up
-# debugging. Showing full tracebacks to regular users could be a
-# security problem - this should *not* be active in a production game!
-IN_GAME_ERRORS = False
+# debugging. OBS: Showing full tracebacks to regular users could be a
+# security problem -turn this off in a production game!
+IN_GAME_ERRORS = True
 
 ######################################################################
 # Evennia Database config
@@ -223,7 +228,7 @@ IN_GAME_ERRORS = False
 # ENGINE - path to the the database backend. Possible choices are:
 #            'django.db.backends.sqlite3', (default)
 #            'django.db.backends.mysql',
-#            'django.db.backends.'postgresql_psycopg2',
+#            'django.db.backends.postgresql_psycopg2',
 #            'django.db.backends.oracle' (untested).
 # NAME - database name, or path to the db file for sqlite3
 # USER - db admin (unused in sqlite3)
@@ -257,13 +262,26 @@ CONN_MAX_AGE = 3600 * 7
 COMMAND_PARSER = "evennia.commands.cmdparser.cmdparser"
 # On a multi-match when search objects or commands, the user has the
 # ability to search again with an index marker that differentiates
-# the results. If multiple "box" objects are found, they can by
-# default use 1-box, 2-box etc to refine the search. Below you
-# can change the index separator character used.
-SEARCH_MULTIMATCH_SEPARATOR = '-'
+# the results. If multiple "box" objects
+# are found, they can by default be separated as 1-box, 2-box. Below you
+# can change the regular expression used. The regex must have one
+# have two capturing groups (?P<number>...) and (?P<name>...) - the default
+# parser expects this. It should also involve a number starting from 1.
+# When changing this you must also update SEARCH_MULTIMATCH_TEMPLATE
+# to properly describe the syntax.
+SEARCH_MULTIMATCH_REGEX = r"(?P<number>[0-9]+)-(?P<name>.*)"
+# To display multimatch errors in various listings we must display
+# the syntax in a way that matches what SEARCH_MULTIMATCH_REGEX understand.
+# The template will be populated with data and expects the following markup:
+# {number} - the order of the multimatch, starting from 1; {name} - the
+# name (key) of the multimatched entity; {aliases} - eventual
+# aliases for the entity; {info} - extra info like #dbrefs for staff. Don't
+# forget a line break if you want one match per line.
+SEARCH_MULTIMATCH_TEMPLATE = " {number}-{name}{aliases}{info}\n"
 # The handler that outputs errors when using any API-level search
 # (not manager methods). This function should correctly report errors
-# both for command- and object-searches.
+# both for command- and object-searches. This allows full control
+# over the error output (it uses SEARCH_MULTIMATCH_TEMPLATE by default).
 SEARCH_AT_RESULT = "evennia.utils.utils.at_search_result"
 # The module holding text strings for the connection screen.
 # This module should contain one or more variables
@@ -291,6 +309,8 @@ PORTAL_SERVICES_PLUGIN_MODULES = ["server.conf.portal_services_plugins"]
 # Module holding MSSP meta data. This is used by MUD-crawlers to determine
 # what type of game you are running, how many players you have etc.
 MSSP_META_MODULE = "server.conf.mssp"
+# Module for web plugins.
+WEB_PLUGINS_MODULE = "server.conf.web_plugins"
 # Tuple of modules implementing lock functions. All callable functions
 # inside these modules will be available as lock functions.
 LOCK_FUNC_MODULES = ("evennia.locks.lockfuncs", "server.conf.lockfuncs",)
@@ -298,9 +318,16 @@ LOCK_FUNC_MODULES = ("evennia.locks.lockfuncs", "server.conf.lockfuncs",)
 # will be loaded in order, meaning functions in later modules may overload
 # previous ones if having the same name.
 INPUT_FUNC_MODULES = ["evennia.server.inputfuncs", "server.conf.inputfuncs"]
+# Modules that contain prototypes for use with the spawner mechanism.
+PROTOTYPE_MODULES = ["world.prototypes"]
 # Module holding settings/actions for the dummyrunner program (see the
 # dummyrunner for more information)
 DUMMYRUNNER_SETTINGS_MODULE = "evennia.server.profiling.dummyrunner_settings"
+# Mapping to extend Evennia's normal ANSI color tags. The mapping is a list of
+# tuples mapping the tag to the ANSI convertion, like `("%c%r", ansi.ANSI_RED)`
+# (the evennia.utils.ansi module contains all ANSI escape sequences). This is
+# mainly supplied for support of legacy codebase tag formats.
+COLOR_ANSI_EXTRA_MAP = []
 
 ######################################################################
 # Default command sets
@@ -321,9 +348,30 @@ CMDSET_CHARACTER = "commands.default_cmdsets.CharacterCmdSet"
 CMDSET_PLAYER = "commands.default_cmdsets.PlayerCmdSet"
 # Location to search for cmdsets if full path not given
 CMDSET_PATHS = ["commands", "evennia", "contribs"]
+# Fallbacks for cmdset paths that fail to load. Note that if you change the path for your default cmdsets,
+# you will also need to copy CMDSET_FALLBACKS after your change in your settings file for it to detect the change.
+CMDSET_FALLBACKS = {CMDSET_CHARACTER: 'evennia.commands.default.cmdset_character.CharacterCmdSet',
+                    CMDSET_PLAYER: 'evennia.commands.default.cmdset_player.PlayerCmdSet',
+                    CMDSET_SESSION: 'evennia.commands.default.cmdset_session.SessionCmdSet',
+                    CMDSET_UNLOGGEDIN: 'evennia.commands.default.cmdset_unloggedin.UnloggedinCmdSet'}
 # Parent class for all default commands. Changing this class will
 # modify all default commands, so do so carefully.
 COMMAND_DEFAULT_CLASS = "evennia.commands.default.muxcommand.MuxCommand"
+# Command.arg_regex is a regular expression desribing how the arguments
+# to the command must be structured for the command to match a given user
+# input. By default there is no restriction as long as the input string
+# starts with the command name.
+COMMAND_DEFAULT_ARG_REGEX = None
+# By default, Command.msg will only send data to the Session calling
+# the Command in the first place. If set, Command.msg will instead return
+# data to all Sessions connected to the Player/Character associated with
+# calling the Command. This may be more intuitive for users in certain
+# multisession modes.
+COMMAND_DEFAULT_MSG_ALL_SESSIONS = False
+# The help category of a command if not otherwise specified.
+COMMAND_DEFAULT_HELP_CATEGORY = "general"
+# The default lockstring of a command.
+COMMAND_DEFAULT_LOCKS = ""
 # The Channel Handler will create a command to represent each channel,
 # creating it with the key of the channel, its aliases, locks etc. The
 # default class logs channel messages to a file and allows for /history.
@@ -395,13 +443,11 @@ BASE_BATCHPROCESS_PATHS = ['world', 'evennia.contrib', 'evennia.contrib.tutorial
 # The time factor dictates if the game world runs faster (timefactor>1)
 # or slower (timefactor<1) than the real world.
 TIME_FACTOR = 2.0
-# These measures might or might not make sense to your game world.
-TIME_SEC_PER_MIN = 60
-TIME_MIN_PER_HOUR = 60
-TIME_HOUR_PER_DAY = 24
-TIME_DAY_PER_WEEK = 7
-TIME_WEEK_PER_MONTH = 4
-TIME_MONTH_PER_YEAR = 12
+# The starting point of your game time (the epoch), in seconds.
+# In Python a value of 0 means Jan 1 1970 (use negatives for earlier
+# start date). This will affect the returns from the utils.gametime
+# module.
+TIME_GAME_EPOCH = None
 
 ######################################################################
 # Inlinefunc
@@ -443,7 +489,7 @@ MAX_NR_CHARACTERS = 1
 # The access hierarchy, in climbing order. A higher permission in the
 # hierarchy includes access of all levels below it. Used by the perm()/pperm()
 # lock functions.
-PERMISSION_HIERARCHY = ["Guests", # note-only used if GUEST_ENABLED=True
+PERMISSION_HIERARCHY = ["Guests",  # note-only used if GUEST_ENABLED=True
                         "Players",
                         "PlayerHelpers",
                         "Builders",
@@ -454,14 +500,19 @@ PERMISSION_PLAYER_DEFAULT = "Players"
 # Default sizes for client window (in number of characters), if client
 # is not supplying this on its own
 CLIENT_DEFAULT_WIDTH = 78
-CLIENT_DEFAULT_HEIGHT = 45 # telnet standard is 24 but does anyone use such
-                           # low-res displays anymore?
+# telnet standard height is 24; does anyone use such low-res displays anymore?
+CLIENT_DEFAULT_HEIGHT = 45
+# Help output from CmdHelp are wrapped in an EvMore call
+# (excluding webclient with separate help popups). If continuous scroll
+# is preferred, change 'HELP_MORE' to False. EvMORE uses CLIENT_DEFAULT_HEIGHT
+HELP_MORE = True
 
 ######################################################################
 # Guest accounts
 ######################################################################
 
-# This enables guest logins, by default via "connect guest"
+# This enables guest logins, by default via "connect guest". Note that
+# you need to edit your login screen to inform about this possibility.
 GUEST_ENABLED = False
 # Typeclass for guest player objects (linked to a character)
 BASE_GUEST_TYPECLASS = "typeclasses.players.Guest"
@@ -492,17 +543,20 @@ GUEST_LIST = ["Guest" + str(s+1) for s in range(9)]
 # general "mud info" channel. Other channels beyond that
 # are up to the admin to design and call appropriately.
 DEFAULT_CHANNELS = [
-                  # public channel
-                  {"key": "Public",
-                  "aliases": ('ooc', 'pub'),
-                  "desc": "Public discussion",
-                  "locks": "control:perm(Wizards);listen:all();send:all()"},
-                  # connection/mud info
-                  {"key": "MudInfo",
-                   "aliases": "",
-                   "desc": "Connection log",
-                   "locks": "control:perm(Immortals);listen:perm(Wizards);send:false()"}
-                  ]
+                    # public channel
+                    {"key": "Public",
+                     "aliases": ('ooc', 'pub'),
+                     "desc": "Public discussion",
+                     "locks": "control:perm(Wizards);listen:all();send:all()"},
+                    #  connection/mud info
+                    {"key": "MudInfo",
+                     "aliases": "",
+                     "desc": "Connection log",
+                     "locks": "control:perm(Immortals);listen:perm(Wizards);send:false()"}
+                   ]
+# Extra optional channel for receiving connection messages ("<player> has (dis)connected").
+# While the MudInfo channel will also receieve this, this channel is meant for non-staffers.
+CHANNEL_CONNECTINFO = None
 
 ######################################################################
 # External Channel connections
@@ -511,8 +565,8 @@ DEFAULT_CHANNELS = [
 # Note: You do *not* have to make your MUD open to
 # the public to use the external connections, they
 # operate as long as you have an internet connection,
-# just like stand-alone chat clients. IRC and IMC2
-# requires that you have twisted.words installed.
+# just like stand-alone chat clients. IRC requires
+# that you have twisted.words installed.
 
 # Evennia can connect to external IRC channels and
 # echo what is said on the channel to IRC and vice
@@ -525,28 +579,8 @@ IRC_ENABLED = False
 # active. OBS: RSS support requires the python-feedparser package to
 # be installed (through package manager or from the website
 # http://code.google.com/p/feedparser/)
-RSS_ENABLED=False
-RSS_UPDATE_INTERVAL = 60*10 # 10 minutes
-
-# IMC (Inter-MUD communication) allows to connect an Evennia channel
-# to an IMC2 server. This lets them talk to people on other MUDs also
-# using IMC.  Evennia's IMC2 client was developed against MudByte's
-# network. You must register your MUD on the network before you can
-# use it, go to http://www.mudbytes.net/imc2-intermud-join-network.
-# Choose 'Other unsupported IMC2 version' from the choices and and
-# enter your information there. You should enter the same 'short mud
-# name' as your SERVERNAME above, then choose imc network server as
-# well as client/server passwords same as below. When enabled, the
-# command @imc2chan becomes available in-game and allows you to
-# connect Evennia channels to IMC channels on the network. The Evennia
-# discussion channel 'ievennia' is on server01.mudbytes.net:5000.
-
-# NOTE - IMC2 is currently NOT FUNCTIONAL due to lack of testing means.
-IMC2_ENABLED = False
-IMC2_NETWORK = "server01.mudbytes.net"
-IMC2_PORT = 5000 # this is the imc2 port, not on localhost
-IMC2_CLIENT_PWD = ""
-IMC2_SERVER_PWD = ""
+RSS_ENABLED = False
+RSS_UPDATE_INTERVAL = 60*10  # 10 minutes
 
 ######################################################################
 # Django web features
@@ -562,7 +596,7 @@ DEBUG = False
 TEMPLATE_DEBUG = DEBUG
 # Emails are sent to these people if the above DEBUG value is False. If you'd
 # rather prefer nobody receives emails, leave this commented out or empty.
-ADMINS = () #'Your Name', 'your_email@domain.com'),)
+ADMINS = ()  # 'Your Name', 'your_email@domain.com'),)
 # These guys get broken link notifications when SEND_BROKEN_LINK_EMAILS is True.
 MANAGERS = ADMINS
 # Absolute path to the directory that holds file uploads from web apps.
@@ -621,6 +655,17 @@ STATICFILES_IGNORE_PATTERNS = ('README.md',)
 # directory names shown in the templates directory.
 WEBSITE_TEMPLATE = 'website'
 WEBCLIENT_TEMPLATE = 'webclient'
+# The default options used by the webclient
+WEBCLIENT_OPTIONS = {
+        "gagprompt": True,  # Gags prompt from the output window and keep them
+                            # together with the input bar
+        "helppopup": True,  # Shows help files in a new popup window
+        "notification_popup": False,  # Shows notifications of new messages as
+                                      # popup windows
+        "notification_sound": False   # Plays a sound for notifications of new
+                                      # messages
+    }
+
 # We setup the location of the website template as well as the admin site.
 TEMPLATES = [{
         'BACKEND': 'django.template.backends.django.DjangoTemplates',
@@ -698,6 +743,7 @@ try:
     import django_extensions
     INSTALLED_APPS = INSTALLED_APPS + ('django_extensions',)
 except ImportError:
+    # Django extensions are not installed in all distros.
     pass
 
 #######################################################################

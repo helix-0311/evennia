@@ -5,17 +5,23 @@ Use the codes defined in ANSIPARSER in your text
 to apply colour to text according to the ANSI standard.
 
 Examples:
- This is %crRed text%cn and this is normal again.
- This is {rRed text{n and this is normal again.
+ This is |rRed text|n and this is normal again.
+ This is {rRed text{n and this is normal again.   # soon to be depreciated
+ This is %crRed text%cn and this is normal again. # depreciated
+
 
 Mostly you should not need to call parse_ansi() explicitly;
 it is run by Evennia just before returning data to/from the
-user.
+user.  Depreciated example forms are available by extending
+the ansi mapping.
 
 """
 from builtins import object, range
 
 import re
+
+from django.conf import settings
+
 from evennia.utils import utils
 from evennia.utils.utils import to_str, to_unicode
 from future.utils import with_metaclass
@@ -77,6 +83,7 @@ class ANSIParser(object):
     We also allow to escape colour codes
     by prepending with a \ for xterm256,
     an extra | for Merc-style codes
+
     """
 
     def sub_ansi(self, ansimatch):
@@ -105,7 +112,7 @@ class ANSIParser(object):
             processed (str): The processed match string.
 
         """
-        return self.ansi_bright_bgs.get(ansimatch.group(), "")
+        return self.ansi_bright_bgs_map.get(ansimatch.group(), "")
 
     def sub_xterm256(self, rgbmatch, use_xterm256=False):
         """
@@ -130,14 +137,37 @@ class ANSIParser(object):
         rgbtag = rgbmatch.group()[1:]
 
         background = rgbtag[0] == '['
-        if background:
-            red, green, blue = int(rgbtag[1]), int(rgbtag[2]), int(rgbtag[3])
+        grayscale = rgbtag[0 + int(background)] == '='
+        if not grayscale:
+            # 6x6x6 color-cube (xterm indexes 16-231)
+            if background:
+                red, green, blue = int(rgbtag[1]), int(rgbtag[2]), int(rgbtag[3])
+            else:
+                red, green, blue = int(rgbtag[0]), int(rgbtag[1]), int(rgbtag[2])
         else:
-            red, green, blue = int(rgbtag[0]), int(rgbtag[1]), int(rgbtag[2])
+            # grayscale values (xterm indexes 0, 232-255, 15) for full spectrum
+            letter = rgbtag[int(background) + 1]
+            if letter == 'a':
+                colval = 16     # pure black @ index 16 (first color cube entry)
+            elif letter == 'z':
+                colval = 231    # pure white @ index 231 (last color cube entry)
+            else:
+                # letter in range [b..y] (exactly 24 values!)
+                colval = 134 + ord(letter)
+
+            # ansi fallback logic expects r,g,b values in [0..5] range
+            gray = (ord(letter)-97)/5.0
+            red, green, blue = gray, gray, gray
 
         if use_xterm256:
-            colval = 16 + (red * 36) + (green * 6) + blue
-            return "\033[%s8;5;%s%s%sm" % (3 + int(background), colval // 100, (colval % 100) // 10, colval%10)
+
+            if not grayscale:
+                colval = 16 + (red * 36) + (green * 6) + blue
+
+            return "\033[%s8;5;%sm" % (3 + int(background), colval)
+            # replaced since some clients (like Potato) does not accept codes with leading zeroes, see issue #1024.
+            # return "\033[%s8;5;%s%s%sm" % (3 + int(background), colval // 100, (colval % 100) // 10, colval%10)
+
         else:
             # xterm256 not supported, convert the rgb value to ansi instead
             if red == green == blue and red < 3:
@@ -263,7 +293,7 @@ class ANSIParser(object):
         in_string = utils.to_str(string)
 
         # do string replacement
-        parsed_string =  ""
+        parsed_string = ""
         parts = self.ansi_escapes.split(in_string) + [" "]
         for part, sep in zip(parts[::2], parts[1::2]):
             pstring = self.xterm256_sub.sub(do_xterm256, part)
@@ -281,7 +311,7 @@ class ANSIParser(object):
         # cache and crop old cache
         _PARSE_CACHE[cachekey] = parsed_string
         if len(_PARSE_CACHE) > _PARSE_CACHE_SIZE:
-           _PARSE_CACHE.popitem(last=False)
+            _PARSE_CACHE.popitem(last=False)
 
         return parsed_string
 
@@ -293,10 +323,11 @@ class ANSIParser(object):
     ext_ansi_map = [
         (r'{n', ANSI_NORMAL),          # reset
         (r'{/', ANSI_RETURN),          # line break
-        (r'{-', ANSI_TAB),             # tab
+        (r'{-', 4*ANSI_SPACE),         # "fixed" tab
+        (r'{t', ANSI_TAB),             # tab
         (r'{_', ANSI_SPACE),           # space
-        (r'{*', ANSI_INVERSE),        # invert
-        (r'{^', ANSI_BLINK),          # blinking text (very annoying and not supported by all clients)
+        (r'{*', ANSI_INVERSE),         # invert
+        (r'{^', ANSI_BLINK),           # blinking text (very annoying and not supported by all clients)
         (r'{u', ANSI_UNDERLINE),       # underline
 
         (r'{r', hilite + ANSI_RED),
@@ -340,14 +371,15 @@ class ANSIParser(object):
         (r'{[W', ANSI_BACK_WHITE),    # light grey background
         (r'{[X', ANSI_BACK_BLACK),     # pure black background
 
-        ## alternative |-format
+        # alternative |-format
 
         (r'|n', ANSI_NORMAL),          # reset
         (r'|/', ANSI_RETURN),          # line break
-        (r'|-', ANSI_TAB),             # tab
+        (r'|-', 4*ANSI_SPACE),         # "fixed" tab, for indentation
+        (r'|t', ANSI_TAB),             # tab
         (r'|_', ANSI_SPACE),           # space
-        (r'|*', ANSI_INVERSE),        # invert
-        (r'|^', ANSI_BLINK),          # blinking text (very annoying and not supported by all clients)
+        (r'|*', ANSI_INVERSE),         # invert
+        (r'|^', ANSI_BLINK),           # blinking text (very annoying and not supported by all clients)
         (r'|u', ANSI_UNDERLINE),       # underline
 
         (r'|r', hilite + ANSI_RED),
@@ -391,6 +423,7 @@ class ANSIParser(object):
         (r'|[W', ANSI_BACK_WHITE),    # light grey background
         (r'|[X', ANSI_BACK_BLACK)     # pure black background
         ]
+    ext_ansi_map += settings.COLOR_ANSI_EXTRA_MAP
 
     ansi_bright_bgs = [
         # "bright" ANSI backgrounds using xterm256 since ANSI
@@ -406,8 +439,7 @@ class ANSIParser(object):
         (r'{[w', r'{[555'),     # white background
         (r'{[x', r'{[222'),     # dark grey background
 
-        ## |-style variations
-
+        # |-style variations
         (r'|[r', r'|[500'),
         (r'|[g', r'|[050'),
         (r'|[y', r'|[550'),
@@ -421,30 +453,30 @@ class ANSIParser(object):
     # the sub_xterm256 method
 
     xterm256_map = [
-        (r'\{[0-5]{3}', ""),   # {123 - foreground colour
+        (r'\{[0-5]{3}', ""),     # {123 - foreground colour
         (r'\{\[[0-5]{3}', ""),   # {[123 - background colour
-        ## -style
-        (r'\|[0-5]{3}', ""),  # |123 - foreground colour
-        (r'\|\[[0-5]{3}', ""),  # |[123 - background colour
+        # |-style
+        (r'\|[0-5]{3}', ""),     # |123 - foreground colour
+        (r'\|\[[0-5]{3}', ""),   # |[123 - background colour
 
-        (r'\{[0-5]{3}', ""),   # {123 - foreground colour
-        (r'\{\[[0-5]{3}', ""),   # {[123 - background colour
-        ## |-style
-        (r'\|[0-5]{3}', ""),  # |123 - foreground colour
-        (r'\|\[[0-5]{3}', ""),  # |[123 - background colour
-        ]
+        # grayscale entries including ansi extremes: {=a .. {=z
+        (r'\{=[a-z]', ""),
+        (r'\{\[=[a-z]', ""),
+        (r'\|=[a-z]', ""),
+        (r'\|\[=[a-z]', ""),
+    ]
 
     mxp_re = r'\|lc(.*?)\|lt(.*?)\|le'
 
     # prepare regex matching
-    brightbg_sub = re.compile(r"|".join([re.escape(tup[0]) for tup in ansi_bright_bgs]), re.DOTALL)
+    brightbg_sub = re.compile(r"|".join([r"(?<!\|)%s" % re.escape(tup[0]) for tup in ansi_bright_bgs]), re.DOTALL)
     xterm256_sub = re.compile(r"|".join([tup[0] for tup in xterm256_map]), re.DOTALL)
     ansi_sub = re.compile(r"|".join([re.escape(tup[0]) for tup in ext_ansi_map]), re.DOTALL)
     mxp_sub = re.compile(mxp_re, re.DOTALL)
 
     # used by regex replacer to correctly map ansi sequences
     ansi_map = dict(ext_ansi_map)
-    ansi_bright_bgs = dict(ansi_bright_bgs)
+    ansi_bright_bgs_map = dict(ansi_bright_bgs)
 
     # prepare matching ansi codes overall
     ansi_re = r"\033\[[0-9;]+m"
@@ -485,6 +517,7 @@ def strip_ansi(string, parser=ANSI_PARSER):
     markup.
 
     Args:
+        string (str): The string to strip.
         parser (ansi.AnsiParser, optional): The parser to use.
 
     Returns:
@@ -492,6 +525,7 @@ def strip_ansi(string, parser=ANSI_PARSER):
 
     """
     return parser.parse_ansi(string, strip_ansi=True)
+
 
 def strip_raw_ansi(string, parser=ANSI_PARSER):
     """
@@ -504,6 +538,7 @@ def strip_raw_ansi(string, parser=ANSI_PARSER):
 
     Returns:
         string (str): the stripped string.
+
     """
     return parser.strip_raw_codes(string)
 
@@ -517,14 +552,7 @@ def raw(string):
         string (str): The raw, escaped string.
 
     """
-    return string.replace('{', '{{')
-
-
-def group(lst, n):
-    for i in range(0, len(lst), n):
-        val = lst[i:i+n]
-        if len(val) == n:
-            yield tuple(val)
+    return string.replace('{', '{{').replace('|', '||')
 
 
 def _spacing_preflight(func):
@@ -540,10 +568,10 @@ def _spacing_preflight(func):
             raise TypeError("must be char, not %s" % type(fillchar))
         if not isinstance(width, int):
             raise TypeError("integer argument expected, got %s" % type(width))
-        difference = width - len(self)
-        if difference <= 0:
+        _difference = width - len(self)
+        if _difference <= 0:
             return self
-        return func(self, width, fillchar, difference)
+        return func(self, width, fillchar, _difference)
     return wrapped
 
 
@@ -572,6 +600,7 @@ def _on_raw(func_name):
             else:
                 args.insert(0, string)
         except IndexError:
+            # just skip out if there are no more strings
             pass
         result = getattr(self._raw_string, func_name)(*args, **kwargs)
         if isinstance(result, basestring):
@@ -629,19 +658,29 @@ class ANSIMeta(type):
 
 class ANSIString(with_metaclass(ANSIMeta, unicode)):
     """
-    String-like object that is aware of ANSI codes.
+    Unicode-like object that is aware of ANSI codes.
 
-    This isn't especially efficient, as it doesn't really have an
+    This class can be used nearly identically to unicode, in that it will
+    report string length, handle slices, etc, much like a unicode or
+    string object would. The methods should be used identically as unicode
+    methods are.
+
+    There is at least one exception to this (and there may be more, though
+    they have not come up yet). When using ''.join() or u''.join() on an
+    ANSIString, color information will get lost. You must use
+    ANSIString('').join() to preserve color information.
+
+    This implementation isn't perfectly clean, as it doesn't really have an
     understanding of what the codes mean in order to eliminate
-    redundant characters. This could be made as an enhancement to ANSI_PARSER.
+    redundant characters-- though cleaning up the strings might end up being
+    inefficient and slow without some C code when dealing with larger values.
+    Such enhancements could be made as an enhancement to ANSI_PARSER
+    if needed, however.
 
     If one is going to use ANSIString, one should generally avoid converting
     away from it until one is about to send information on the wire. This is
     because escape sequences in the string may otherwise already be decoded,
     and taken literally the second time around.
-
-    Please refer to the Metaclass, ANSIMeta, which is used to apply wrappers
-    for several of the methods that need not be defined directly here.
 
     """
 
@@ -847,6 +886,7 @@ class ANSIString(with_metaclass(ANSIMeta, unicode)):
             try:
                 string += self._raw_string[i]
             except IndexError:
+                # raw_string not long enough
                 pass
         if i is not None:
             append_tail = self._get_interleving(self._char_indexes.index(i) + 1)
@@ -889,6 +929,9 @@ class ANSIString(with_metaclass(ANSIMeta, unicode)):
         """
         Return a unicode object without the ANSI escapes.
 
+        Returns:
+            clean_string (unicode): A unicode object with no ANSI escapes.
+
         """
         return self._clean_string
 
@@ -896,19 +939,30 @@ class ANSIString(with_metaclass(ANSIMeta, unicode)):
         """
         Return a unicode object with the ANSI escapes.
 
+        Returns:
+            raw (unicode): A unicode object with the raw ANSI escape sequences.
+
         """
         return self._raw_string
 
     def partition(self, sep, reverse=False):
         """
-        Similar to split, but always creates a tuple with three items:
-
-        1. The part before the separator
-        2. The separator itself.
-        3. The part after.
+        Splits once into three sections (with the separator being the middle section)
 
         We use the same techniques we used in split() to make sure each are
         colored.
+
+        Args:
+            sep (str): The separator to split the string on.
+            reverse (boolean): Whether to split the string on the last
+                occurrence of the separator rather than the first.
+        Returns:
+            result (tuple):
+               prefix (ANSIString): The part of the string before the
+                   separator
+               sep (ANSIString): The separator itself
+               postfix (ANSIString): The part of the string after the
+                   separator.
 
         """
         if hasattr(sep, '_clean_string'):
@@ -974,33 +1028,6 @@ class ANSIString(with_metaclass(ANSIMeta, unicode)):
                 break
         return s
 
-    def split(self, by, maxsplit=-1):
-        """
-        Stolen from PyPy's pure Python string implementation, tweaked for
-        ANSIString.
-
-        PyPy is distributed under the MIT licence.
-        http://opensource.org/licenses/MIT
-
-        """
-        bylen = len(by)
-        if bylen == 0:
-            raise ValueError("empty separator")
-
-        res = []
-        start = 0
-        while maxsplit != 0:
-            next = self._clean_string.find(by, start)
-            if next < 0:
-                break
-            # Get character codes after the index as well.
-            res.append(self[start:next])
-            start = next + bylen
-            maxsplit -= 1   # NB. if it's already < 0, it stays < 0
-
-        res.append(self[start:len(self)])
-        return res
-
     def __mul__(self, other):
         """
         Multiplication method. Implemented for performance reasons.
@@ -1024,17 +1051,82 @@ class ANSIString(with_metaclass(ANSIMeta, unicode)):
     def __rmul__(self, other):
         return self.__mul__(other)
 
-    def rsplit(self, by, maxsplit=-1):
+    def split(self, by=None, maxsplit=-1):
         """
+        Splits a string based on a separator.
+
         Stolen from PyPy's pure Python string implementation, tweaked for
         ANSIString.
 
         PyPy is distributed under the MIT licence.
         http://opensource.org/licenses/MIT
 
+        Args:
+            by (str): A string to search for which will be used to split
+                the string. For instance, ',' for 'Hello,world' would
+                result in ['Hello', 'world']
+            maxsplit (int): The maximum number of times to split the string.
+                For example, a maxsplit of 2 with a by of ',' on the string
+                'Hello,world,test,string' would result in
+                ['Hello', 'world', 'test,string']
+        Returns:
+            result (list of ANSIStrings): A list of ANSIStrings derived from
+                this string.
+
+        """
+        drop_spaces = by is None
+        if drop_spaces:
+            by = " "
+
+        bylen = len(by)
+        if bylen == 0:
+            raise ValueError("empty separator")
+
+        res = []
+        start = 0
+        while maxsplit != 0:
+            next = self._clean_string.find(by, start)
+            if next < 0:
+                break
+            # Get character codes after the index as well.
+            res.append(self[start:next])
+            start = next + bylen
+            maxsplit -= 1   # NB. if it's already < 0, it stays < 0
+
+        res.append(self[start:len(self)])
+        if drop_spaces:
+            return [part for part in res if part != ""]
+        return res
+
+    def rsplit(self, by=None, maxsplit=-1):
+        """
+        Like split, but starts from the end of the string rather than the
+        beginning.
+
+        Stolen from PyPy's pure Python string implementation, tweaked for
+        ANSIString.
+
+        PyPy is distributed under the MIT licence.
+        http://opensource.org/licenses/MIT
+
+        Args:
+            by (str): A string to search for which will be used to split
+                the string. For instance, ',' for 'Hello,world' would
+                result in ['Hello', 'world']
+            maxsplit (int): The maximum number of times to split the string.
+                For example, a maxsplit of 2 with a by of ',' on the string
+                'Hello,world,test,string' would result in
+                ['Hello,world', 'test', 'string']
+        Returns:
+            result (list of ANSIStrings): A list of ANSIStrings derived from
+                this string.
+
         """
         res = []
         end = len(self)
+        drop_spaces = by is None
+        if drop_spaces:
+            by = " "
         bylen = len(by)
         if bylen == 0:
             raise ValueError("empty separator")
@@ -1050,11 +1142,137 @@ class ANSIString(with_metaclass(ANSIMeta, unicode)):
 
         res.append(self[:end])
         res.reverse()
+        if drop_spaces:
+            return [part for part in res if part != ""]
         return res
+
+    def strip(self, chars=None):
+        """
+        Strip from both ends, taking ANSI markers into account.
+
+        Args:
+            chars (str, optional): A string containing individual characters
+                to strip off of both ends of the string. By default, any blank
+                spaces are trimmed.
+        Returns:
+            result (ANSIString): A new ANSIString with the ends trimmed of the
+                relevant characters.
+
+        """
+        clean = self._clean_string
+        raw = self._raw_string
+
+        # count continuous sequence of chars from left and right
+        nlen = len(clean)
+        nlstripped = nlen - len(clean.lstrip(chars))
+        nrstripped = nlen - len(clean.rstrip(chars))
+
+        # within the stripped regions, only retain parts of the raw
+        # string *not* matching the clean string (these are ansi/mxp tags)
+        lstripped = ""
+        ic, ir1 = 0, 0
+        while nlstripped:
+            if ic >= nlstripped:
+                break
+            elif raw[ir1] != clean[ic]:
+                lstripped += raw[ir1]
+            else:
+                ic += 1
+            ir1 += 1
+        rstripped = ""
+        ic, ir2 = nlen-1, len(raw)-1
+        while nrstripped:
+            if nlen - ic > nrstripped:
+                break
+            elif raw[ir2] != clean[ic]:
+                rstripped += raw[ir2]
+            else:
+                ic -= 1
+            ir2 -= 1
+        rstripped = rstripped[::-1]
+        return ANSIString(lstripped + raw[ir1:ir2+1] + rstripped)
+
+    def lstrip(self, chars=None):
+        """
+        Strip from the left, taking ANSI markers into account.
+
+        Args:
+            chars (str, optional): A string containing individual characters
+                to strip off of the left end of the string. By default, any
+                blank spaces are trimmed.
+        Returns:
+            result (ANSIString): A new ANSIString with the left end trimmed of
+                the relevant characters.
+
+        """
+        clean = self._clean_string
+        raw = self._raw_string
+
+        # count continuous sequence of chars from left and right
+        nlen = len(clean)
+        nlstripped = nlen - len(clean.lstrip(chars))
+        # within the stripped regions, only retain parts of the raw
+        # string *not* matching the clean string (these are ansi/mxp tags)
+        lstripped = ""
+        ic, ir1 = 0, 0
+        while nlstripped:
+            if ic >= nlstripped:
+                break
+            elif raw[ir1] != clean[ic]:
+                lstripped += raw[ir1]
+            else:
+                ic += 1
+            ir1 += 1
+        return ANSIString(lstripped + raw[ir1:])
+
+    def rstrip(self, chars=None):
+        """
+        Strip from the right, taking ANSI markers into account.
+
+        Args:
+            chars (str, optional): A string containing individual characters
+                to strip off of the right end of the string. By default, any
+                blank spaces are trimmed.
+        Returns:
+            result (ANSIString): A new ANSIString with the right end trimmed of
+                the relevant characters.
+
+        """
+        clean = self._clean_string
+        raw = self._raw_string
+        nlen = len(clean)
+        nrstripped = nlen - len(clean.rstrip(chars))
+        rstripped = ""
+        ic, ir2 = nlen-1, len(raw)-1
+        while nrstripped:
+            if nlen - ic > nrstripped:
+                break
+            elif raw[ir2] != clean[ic]:
+                rstripped += raw[ir2]
+            else:
+                ic -= 1
+            ir2 -= 1
+        rstripped = rstripped[::-1]
+        return ANSIString(raw[:ir2+1] + rstripped)
 
     def join(self, iterable):
         """
-        Joins together strings in an iterable.
+        Joins together strings in an iterable, using this string between each
+        one.
+
+        NOTE: This should always be used for joining strings when ANSIStrings
+            are involved. Otherwise color information will be discarded by
+            python, due to details in the C implementation of unicode strings.
+
+        Args:
+            iterable (list of strings): A list of strings to join together
+        Returns:
+            result (ANSIString): A single string with all of the iterable's
+                contents concatenated, with this string between each. For
+                example:
+                    ANSIString(', ').join(['up', 'right', 'left', 'down'])
+                ...Would return:
+                    ANSIString('up, right, left, down')
 
         """
         result = ANSIString('')
@@ -1096,30 +1314,53 @@ class ANSIString(with_metaclass(ANSIMeta, unicode)):
             raw_string, clean_string=line, char_indexes=char_indexes,
             code_indexes=code_indexes)
 
+    # The following methods should not be called with the '_difference' argument explicitly. This is
+    # data provided by the wrapper _spacing_preflight.
     @_spacing_preflight
-    def center(self, width, fillchar, difference):
+    def center(self, width, fillchar, _difference):
         """
         Center some text with some spaces padding both sides.
 
+        Args:
+            width (int): The target width of the output string.
+            fillchar (str): A single character string to pad the output string
+                with.
+        Returns:
+            result (ANSIString): A string padded on both ends with fillchar.
+
         """
-        remainder = difference % 2
-        difference /= 2
-        spacing = self._filler(fillchar, difference)
+        remainder = _difference % 2
+        _difference /= 2
+        spacing = self._filler(fillchar, _difference)
         result = spacing + self + spacing + self._filler(fillchar, remainder)
         return result
 
     @_spacing_preflight
-    def ljust(self, width, fillchar, difference):
+    def ljust(self, width, fillchar, _difference):
         """
         Left justify some text.
 
+        Args:
+            width (int): The target width of the output string.
+            fillchar (str): A single character string to pad the output string
+                with.
+        Returns:
+            result (ANSIString): A string padded on the right with fillchar.
+
         """
-        return self + self._filler(fillchar, difference)
+        return self + self._filler(fillchar, _difference)
 
     @_spacing_preflight
-    def rjust(self, width, fillchar, difference):
+    def rjust(self, width, fillchar, _difference):
         """
         Right justify some text.
 
+        Args:
+            width (int): The target width of the output string.
+            fillchar (str): A single character string to pad the output string
+                with.
+        Returns:
+            result (ANSIString): A string padded on the left with fillchar.
+
         """
-        return self._filler(fillchar, difference) + self
+        return self._filler(fillchar, _difference) + self

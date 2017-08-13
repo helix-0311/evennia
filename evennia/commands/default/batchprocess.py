@@ -17,6 +17,7 @@ the Evennia API.  It is also a severe security risk and should
 therefore always be limited to superusers only.
 
 """
+import re
 from builtins import range
 
 from django.conf import settings
@@ -24,16 +25,17 @@ from evennia.utils.batchprocessors import BATCHCMD, BATCHCODE
 from evennia.commands.cmdset import CmdSet
 from evennia.utils import logger, utils
 
-COMMAND_DEFAULT_CLASS = utils.class_from_module(settings.COMMAND_DEFAULT_CLASS)
-#from evennia.commands.default.muxcommand import COMMAND_DEFAULT_CLASS
+
+_RE_COMMENT = re.compile(r"^#.*?$", re.MULTILINE + re.DOTALL)
+_RE_CODE_START = re.compile(r"^# batchcode code:", re.MULTILINE)
+_COMMAND_DEFAULT_CLASS = utils.class_from_module(settings.COMMAND_DEFAULT_CLASS)
 
 # limit symbols for API inclusion
 __all__ = ("CmdBatchCommands", "CmdBatchCode")
 
 _HEADER_WIDTH = 70
-_UTF8_ERROR = \
-"""
- {rDecode error in '%s'.{n
+_UTF8_ERROR = """
+ |rDecode error in '%s'.|n
 
  This file contains non-ascii character(s). This is common if you
  wrote some input in a language that has more letters and special
@@ -79,20 +81,24 @@ print "leaving run ..."
 """
 
 
-#------------------------------------------------------------
+# -------------------------------------------------------------
 # Helper functions
-#------------------------------------------------------------
+# -------------------------------------------------------------
 
 def format_header(caller, entry):
     """
     Formats a header
     """
     width = _HEADER_WIDTH - 10
-    entry = entry.strip()
+    # strip all comments for the header
+    if caller.ndb.batch_batchmode != "batch_commands":
+        # only do cleanup for  batchcode
+        entry = _RE_CODE_START.split(entry, 1)[1]
+        entry = _RE_COMMENT.sub("", entry).strip()
     header = utils.crop(entry, width=width)
     ptr = caller.ndb.batch_stackptr + 1
     stacklen = len(caller.ndb.batch_stack)
-    header = "{w%02i/%02i{G: %s{n" % (ptr, stacklen, header)
+    header = "|w%02i/%02i|G: %s|n" % (ptr, stacklen, header)
     # add extra space to the side for padding.
     header = "%s%s" % (header, " " * (width - len(header)))
     header = header.replace('\n', '\\n')
@@ -106,7 +112,7 @@ def format_code(entry):
     """
     code = ""
     for line in entry.split('\n'):
-        code += "\n{G>>>{n %s" % line
+        code += "\n|G>>>|n %s" % line
     return code.strip()
 
 
@@ -156,9 +162,9 @@ def step_pointer(caller, step=1):
     stack = caller.ndb.batch_stack
     nstack = len(stack)
     if ptr + step <= 0:
-        caller.msg("{RBeginning of batch file.")
+        caller.msg("|RBeginning of batch file.")
     if ptr + step >= nstack:
-        caller.msg("{REnd of batch file.")
+        caller.msg("|REnd of batch file.")
     caller.ndb.batch_stackptr = max(0, min(nstack - 1, ptr + step))
 
 
@@ -178,10 +184,10 @@ def show_curr(caller, showall=False):
 
     string = format_header(caller, entry)
     codeall = entry.strip()
-    string += "{G(hh for help)"
+    string += "|G(hh for help)"
     if showall:
         for line in codeall.split('\n'):
-            string += "\n{G|{n %s" % line
+            string += "\n|G||n %s" % line
     caller.msg(string)
 
 
@@ -195,19 +201,26 @@ def purge_processor(caller):
         del caller.ndb.batch_stackptr
         del caller.ndb.batch_pythonpath
         del caller.ndb.batch_batchmode
-    except:
+    except Exception:
+        # something might have already been erased; it's not critical
         pass
-    # clear everything but the default cmdset.
-    caller.cmdset.delete(BatchSafeCmdSet)
-    caller.cmdset.clear()
+    # clear everything back to the state before the batch call
+    if caller.ndb.batch_cmdset_backup:
+        caller.cmdset.cmdset_stack = caller.ndb.batch_cmdset_backup
+        caller.cmdset.update()
+        del caller.ndb.batch_cmdset_backup
+    else:
+        # something went wrong. Purge cmdset except default
+        caller.cmdset.clear()
+
     caller.scripts.validate()  # this will purge interactive mode
 
-#------------------------------------------------------------
+# -------------------------------------------------------------
 # main access commands
-#------------------------------------------------------------
+# -------------------------------------------------------------
 
 
-class CmdBatchCommands(COMMAND_DEFAULT_CLASS):
+class CmdBatchCommands(_COMMAND_DEFAULT_CLASS):
     """
     build from batch-command file
 
@@ -228,7 +241,7 @@ class CmdBatchCommands(COMMAND_DEFAULT_CLASS):
     help_category = "Building"
 
     def func(self):
-        "Starts the processor."
+        """Starts the processor."""
 
         caller = self.caller
 
@@ -238,7 +251,7 @@ class CmdBatchCommands(COMMAND_DEFAULT_CLASS):
             return
         python_path = self.args
 
-        #parse indata file
+        # parse indata file
 
         try:
             commands = BATCHCMD.parse_file(python_path)
@@ -246,8 +259,8 @@ class CmdBatchCommands(COMMAND_DEFAULT_CLASS):
             caller.msg(_UTF8_ERROR % (python_path, err))
             return
         except IOError as err:
-            string = "'%s' not found.\nYou have to supply the python path "
-            string += "of the file relative to \none of your batch-file directories (%s)."
+            string = "'%s' not found.\nYou have to supply the python path\n" \
+                     "using one of the defined batch-file directories\n (%s)."
             caller.msg(string % (python_path, ", ".join(settings.BASE_BATCHPROCESS_PATHS)))
             return
         if not commands:
@@ -261,6 +274,8 @@ class CmdBatchCommands(COMMAND_DEFAULT_CLASS):
         caller.ndb.batch_stackptr = 0
         caller.ndb.batch_pythonpath = python_path
         caller.ndb.batch_batchmode = "batch_commands"
+        # we use list() here to create a new copy of the cmdset stack
+        caller.ndb.batch_cmdset_backup = list(caller.cmdset.cmdset_stack)
         caller.cmdset.add(BatchSafeCmdSet)
 
         if 'inter' in switches or 'interactive' in switches:
@@ -272,7 +287,8 @@ class CmdBatchCommands(COMMAND_DEFAULT_CLASS):
             caller.msg("\nBatch-command processor - Interactive mode for %s ..." % python_path)
             show_curr(caller)
         else:
-            caller.msg("Running Batch-command processor - Automatic mode for %s (this might take some time) ..." % python_path)
+            caller.msg("Running Batch-command processor - Automatic mode for %s (this might take some time) ..."
+                       % python_path)
 
             procpool = False
             if "PythonProcPool" in utils.server_services():
@@ -284,11 +300,11 @@ class CmdBatchCommands(COMMAND_DEFAULT_CLASS):
             if procpool:
                 # run in parallel process
                 def callback(r):
-                    caller.msg("  {GBatchfile '%s' applied." % python_path)
+                    caller.msg("  |GBatchfile '%s' applied." % python_path)
                     purge_processor(caller)
 
                 def errback(e):
-                    caller.msg("  {RError from processor: '%s'" % e)
+                    caller.msg("  |RError from processor: '%s'" % e)
                     purge_processor(caller)
 
                 utils.run_async(_PROCPOOL_BATCHCMD_SOURCE,
@@ -298,7 +314,7 @@ class CmdBatchCommands(COMMAND_DEFAULT_CLASS):
                                 at_err=errback)
             else:
                 # run in-process (might block)
-                for inum in range(len(commands)):
+                for _ in range(len(commands)):
                     # loop through the batch file
                     if not batch_cmd_exec(caller):
                         return
@@ -306,11 +322,11 @@ class CmdBatchCommands(COMMAND_DEFAULT_CLASS):
                 # clean out the safety cmdset and clean out all other
                 # temporary attrs.
                 string = "  Batchfile '%s' applied." % python_path
-                caller.msg("{G%s" % string)
+                caller.msg("|G%s" % string)
                 purge_processor(caller)
 
 
-class CmdBatchCode(COMMAND_DEFAULT_CLASS):
+class CmdBatchCode(_COMMAND_DEFAULT_CLASS):
     """
     build from batch-code file
 
@@ -335,7 +351,7 @@ class CmdBatchCode(COMMAND_DEFAULT_CLASS):
     help_category = "Building"
 
     def func(self):
-        "Starts the processor."
+        """Starts the processor."""
 
         caller = self.caller
 
@@ -346,15 +362,15 @@ class CmdBatchCode(COMMAND_DEFAULT_CLASS):
         python_path = self.args
         debug = 'debug' in self.switches
 
-        #parse indata file
+        # parse indata file
         try:
-            codes = BATCHCODE.parse_file(python_path, debug=debug)
+            codes = BATCHCODE.parse_file(python_path)
         except UnicodeDecodeError as err:
             caller.msg(_UTF8_ERROR % (python_path, err))
             return
         except IOError:
-            string = "'%s' not found.\nYou have to supply the python path "
-            string += "of the file relative to \nyour batch-file directories (%s)."
+            string = "'%s' not found.\nYou have to supply the python path\n" \
+                     "from one of the defined batch-file directories\n (%s)."
             caller.msg(string % (python_path, ", ".join(settings.BASE_BATCHPROCESS_PATHS)))
             return
         if not codes:
@@ -369,6 +385,8 @@ class CmdBatchCode(COMMAND_DEFAULT_CLASS):
         caller.ndb.batch_pythonpath = python_path
         caller.ndb.batch_batchmode = "batch_code"
         caller.ndb.batch_debug = debug
+        # we use list() here to create a new copy of cmdset_stack
+        caller.ndb.batch_cmdset_backup = list(caller.cmdset.cmdset_stack)
         caller.cmdset.add(BatchSafeCmdSet)
 
         if 'inter' in switches or 'interactive'in switches:
@@ -391,11 +409,11 @@ class CmdBatchCode(COMMAND_DEFAULT_CLASS):
             if procpool:
                 # run in parallel process
                 def callback(r):
-                    caller.msg("  {GBatchfile '%s' applied." % python_path)
+                    caller.msg("  |GBatchfile '%s' applied." % python_path)
                     purge_processor(caller)
 
                 def errback(e):
-                    caller.msg("  {RError from processor: '%s'" % e)
+                    caller.msg("  |RError from processor: '%s'" % e)
                     purge_processor(caller)
                 utils.run_async(_PROCPOOL_BATCHCODE_SOURCE,
                                 codes=codes,
@@ -404,7 +422,7 @@ class CmdBatchCode(COMMAND_DEFAULT_CLASS):
                                 at_err=errback)
             else:
                 # un in-process (will block)
-                for inum in range(len(codes)):
+                for _ in range(len(codes)):
                     # loop through the batch file
                     if not batch_code_exec(caller):
                         return
@@ -412,16 +430,16 @@ class CmdBatchCode(COMMAND_DEFAULT_CLASS):
                 # clean out the safety cmdset and clean out all other
                 # temporary attrs.
                 string = "  Batchfile '%s' applied." % python_path
-                caller.msg("{G%s" % string)
+                caller.msg("|G%s" % string)
                 purge_processor(caller)
 
 
-#------------------------------------------------------------
+# -------------------------------------------------------------
 # State-commands for the interactive batch processor modes
 # (these are the same for both processors)
-#------------------------------------------------------------
+# -------------------------------------------------------------
 
-class CmdStateAbort(COMMAND_DEFAULT_CLASS):
+class CmdStateAbort(_COMMAND_DEFAULT_CLASS):
     """
     @abort
 
@@ -434,12 +452,12 @@ class CmdStateAbort(COMMAND_DEFAULT_CLASS):
     locks = "cmd:perm(batchcommands)"
 
     def func(self):
-        "Exit back to default."
+        """Exit back to default."""
         purge_processor(self.caller)
         self.caller.msg("Exited processor and reset out active cmdset back to the default one.")
 
 
-class CmdStateLL(COMMAND_DEFAULT_CLASS):
+class CmdStateLL(_COMMAND_DEFAULT_CLASS):
     """
     ll
 
@@ -453,7 +471,8 @@ class CmdStateLL(COMMAND_DEFAULT_CLASS):
     def func(self):
         show_curr(self.caller, showall=True)
 
-class CmdStatePP(COMMAND_DEFAULT_CLASS):
+
+class CmdStatePP(_COMMAND_DEFAULT_CLASS):
     """
     pp
 
@@ -474,7 +493,7 @@ class CmdStatePP(COMMAND_DEFAULT_CLASS):
             batch_cmd_exec(caller)
 
 
-class CmdStateRR(COMMAND_DEFAULT_CLASS):
+class CmdStateRR(_COMMAND_DEFAULT_CLASS):
     """
     rr
 
@@ -496,7 +515,7 @@ class CmdStateRR(COMMAND_DEFAULT_CLASS):
         show_curr(caller)
 
 
-class CmdStateRRR(COMMAND_DEFAULT_CLASS):
+class CmdStateRRR(_COMMAND_DEFAULT_CLASS):
     """
     rrr
 
@@ -518,7 +537,7 @@ class CmdStateRRR(COMMAND_DEFAULT_CLASS):
         show_curr(caller)
 
 
-class CmdStateNN(COMMAND_DEFAULT_CLASS):
+class CmdStateNN(_COMMAND_DEFAULT_CLASS):
     """
     nn
 
@@ -539,7 +558,7 @@ class CmdStateNN(COMMAND_DEFAULT_CLASS):
         show_curr(caller)
 
 
-class CmdStateNL(COMMAND_DEFAULT_CLASS):
+class CmdStateNL(_COMMAND_DEFAULT_CLASS):
     """
     nl
 
@@ -561,7 +580,7 @@ class CmdStateNL(COMMAND_DEFAULT_CLASS):
         show_curr(caller, showall=True)
 
 
-class CmdStateBB(COMMAND_DEFAULT_CLASS):
+class CmdStateBB(_COMMAND_DEFAULT_CLASS):
     """
     bb
 
@@ -583,7 +602,7 @@ class CmdStateBB(COMMAND_DEFAULT_CLASS):
         show_curr(caller)
 
 
-class CmdStateBL(COMMAND_DEFAULT_CLASS):
+class CmdStateBL(_COMMAND_DEFAULT_CLASS):
     """
     bl
 
@@ -605,7 +624,7 @@ class CmdStateBL(COMMAND_DEFAULT_CLASS):
         show_curr(caller, showall=True)
 
 
-class CmdStateSS(COMMAND_DEFAULT_CLASS):
+class CmdStateSS(_COMMAND_DEFAULT_CLASS):
     """
     ss [steps]
 
@@ -625,7 +644,7 @@ class CmdStateSS(COMMAND_DEFAULT_CLASS):
         else:
             step = 1
 
-        for istep in range(step):
+        for _ in range(step):
             if caller.ndb.batch_batchmode == "batch_code":
                 batch_code_exec(caller)
             else:
@@ -634,7 +653,7 @@ class CmdStateSS(COMMAND_DEFAULT_CLASS):
             show_curr(caller)
 
 
-class CmdStateSL(COMMAND_DEFAULT_CLASS):
+class CmdStateSL(_COMMAND_DEFAULT_CLASS):
     """
     sl [steps]
 
@@ -654,7 +673,7 @@ class CmdStateSL(COMMAND_DEFAULT_CLASS):
         else:
             step = 1
 
-        for istep in range(step):
+        for _ in range(step):
             if caller.ndb.batch_batchmode == "batch_code":
                 batch_code_exec(caller)
             else:
@@ -663,7 +682,7 @@ class CmdStateSL(COMMAND_DEFAULT_CLASS):
             show_curr(caller)
 
 
-class CmdStateCC(COMMAND_DEFAULT_CLASS):
+class CmdStateCC(_COMMAND_DEFAULT_CLASS):
     """
     cc
 
@@ -680,7 +699,7 @@ class CmdStateCC(COMMAND_DEFAULT_CLASS):
         ptr = caller.ndb.batch_stackptr
         step = nstack - ptr
 
-        for istep in range(step):
+        for _ in range(step):
             if caller.ndb.batch_batchmode == "batch_code":
                 batch_code_exec(caller)
             else:
@@ -688,14 +707,11 @@ class CmdStateCC(COMMAND_DEFAULT_CLASS):
             step_pointer(caller, 1)
             show_curr(caller)
 
-        del caller.ndb.batch_stack
-        del caller.ndb.batch_stackptr
-        del caller.ndb.batch_pythonpath
-        del caller.ndb.batch_batchmode
+        purge_processor(self)
         caller.msg(format_code("Finished processing batch file."))
 
 
-class CmdStateJJ(COMMAND_DEFAULT_CLASS):
+class CmdStateJJ(_COMMAND_DEFAULT_CLASS):
     """
     jj <command number>
 
@@ -719,7 +735,7 @@ class CmdStateJJ(COMMAND_DEFAULT_CLASS):
         show_curr(caller)
 
 
-class CmdStateJL(COMMAND_DEFAULT_CLASS):
+class CmdStateJL(_COMMAND_DEFAULT_CLASS):
     """
     jl <command number>
 
@@ -743,7 +759,7 @@ class CmdStateJL(COMMAND_DEFAULT_CLASS):
         show_curr(caller, showall=True)
 
 
-class CmdStateQQ(COMMAND_DEFAULT_CLASS):
+class CmdStateQQ(_COMMAND_DEFAULT_CLASS):
     """
     qq
 
@@ -758,8 +774,8 @@ class CmdStateQQ(COMMAND_DEFAULT_CLASS):
         self.caller.msg("Aborted interactive batch mode.")
 
 
-class CmdStateHH(COMMAND_DEFAULT_CLASS):
-    "Help command"
+class CmdStateHH(_COMMAND_DEFAULT_CLASS):
+    """Help command"""
 
     key = "hh"
     help_category = "BatchProcess"
@@ -794,12 +810,12 @@ class CmdStateHH(COMMAND_DEFAULT_CLASS):
         self.caller.msg(string)
 
 
-#------------------------------------------------------------
+# -------------------------------------------------------------
 #
 # Defining the cmdsets for the interactive batchprocessor
 # mode (same for both processors)
 #
-#------------------------------------------------------------
+# -------------------------------------------------------------
 
 class BatchSafeCmdSet(CmdSet):
     """
@@ -811,7 +827,7 @@ class BatchSafeCmdSet(CmdSet):
     priority = 150  # override other cmdsets.
 
     def at_cmdset_creation(self):
-        "Init the cmdset"
+        """Init the cmdset"""
         self.add(CmdStateAbort())
 
 
@@ -823,7 +839,7 @@ class BatchInteractiveCmdSet(CmdSet):
     priority = 104
 
     def at_cmdset_creation(self):
-        "init the cmdset"
+        """init the cmdset"""
         self.add(CmdStateAbort())
         self.add(CmdStateLL())
         self.add(CmdStatePP())

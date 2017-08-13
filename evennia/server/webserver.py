@@ -13,17 +13,42 @@ a great example/aid on how to do this.)
 """
 import urlparse
 from urllib import quote as urlquote
-from twisted.web import resource, http
+from twisted.web import resource, http, server
 from twisted.internet import reactor
 from twisted.application import internet
 from twisted.web.proxy import ReverseProxyResource
 from twisted.web.server import NOT_DONE_YET
+from twisted.python import threadpool
+from twisted.internet import defer
 
 from twisted.web.wsgi import WSGIResource
 from django.conf import settings
 from django.core.handlers.wsgi import WSGIHandler
 
-UPSTREAM_IPS = settings.UPSTREAM_IPS
+from evennia.utils import logger
+
+_UPSTREAM_IPS = settings.UPSTREAM_IPS
+_DEBUG = settings.DEBUG
+
+
+class LockableThreadPool(threadpool.ThreadPool):
+    """
+    Threadpool that can be locked from accepting new requests.
+    """
+    def __init__(self, *args, **kwargs):
+        self._accept_new = True
+        threadpool.ThreadPool.__init__(self, *args, **kwargs)
+
+    def lock(self):
+        self._accept_new = False
+
+    def callInThread(self, func, *args, **kwargs):
+        """
+        called in the main reactor thread. Makes sure the pool
+        is not locked before continuing.
+        """
+        if self._accept_new:
+            threadpool.ThreadPool.callInThread(self, func, *args, **kwargs)
 
 
 #
@@ -45,7 +70,7 @@ class HTTPChannelWithXForwardedFor(http.HTTPChannel):
         req = self.requests[-1]
         client_ip, port = self.transport.client
         proxy_chain = req.getHeader('X-FORWARDED-FOR')
-        if proxy_chain and client_ip in UPSTREAM_IPS:
+        if proxy_chain and client_ip in _UPSTREAM_IPS:
             forwarded = proxy_chain.split(', ', 1)[CLIENT]
             self.transport.client = (forwarded, port)
 
@@ -70,6 +95,7 @@ class EvenniaReverseProxyResource(ReverseProxyResource):
             resource (EvenniaReverseProxyResource): A proxy resource.
 
         """
+        request.notifyFinish().addErrback(lambda f: logger.log_trace("%s\nCaught errback in webserver.py:75." % f))
         return EvenniaReverseProxyResource(
             self.host, self.port, self.path + '/' + urlquote(path, safe=""),
             self.reactor)
@@ -96,7 +122,10 @@ class EvenniaReverseProxyResource(ReverseProxyResource):
         clientFactory = self.proxyClientFactoryClass(
             request.method, rest, request.clientproto,
             request.getAllHeaders(), request.content.read(), request)
+        clientFactory.noisy = False
         self.reactor.connectTCP(self.host, self.port, clientFactory)
+        # don't trigger traceback if connection is lost before request finish.
+        request.notifyFinish().addErrback(lambda f: logger.log_trace("%s\nCaught errback in webserver.py:75." % f))
         return NOT_DONE_YET
 
 
@@ -104,12 +133,14 @@ class EvenniaReverseProxyResource(ReverseProxyResource):
 # Website server resource
 #
 
+
 class DjangoWebRoot(resource.Resource):
     """
     This creates a web root (/) that Django
     understands by tweaking the way
-    child instancee ars recognized.
+    child instances are recognized.
     """
+
     def __init__(self, pool):
         """
         Setup the django+twisted resource.
@@ -118,8 +149,29 @@ class DjangoWebRoot(resource.Resource):
             pool (ThreadPool): The twisted threadpool.
 
         """
+        self.pool = pool
+        self._echo_log = True
+        self._pending_requests = {}
         resource.Resource.__init__(self)
         self.wsgi_resource = WSGIResource(reactor, pool, WSGIHandler())
+
+    def empty_threadpool(self):
+        """
+        Converts our _pending_requests list of deferreds into a DeferredList
+
+        Returns:
+            deflist (DeferredList): Contains all deferreds of pending requests.
+
+        """
+        self.pool.lock()
+        if self._pending_requests and self._echo_log:
+            self._echo_log = False  # just to avoid multiple echoes
+            msg = "Webserver waiting for %i requests ... "
+            logger.log_info(msg % len(self._pending_requests))
+        return defer.DeferredList(self._pending_requests, consumeErrors=True)
+
+    def _decrement_requests(self, *args, **kwargs):
+        self._pending_requests.pop(kwargs.get('deferred', None), None)
 
     def getChild(self, path, request):
         """
@@ -130,10 +182,36 @@ class DjangoWebRoot(resource.Resource):
             path (str): Url path.
             request (Request object): Incoming request.
 
+        Notes:
+            We make sure to save the request queue so
+            that we can safely kill the threadpool
+            on a server reload.
+
         """
         path0 = request.prepath.pop(0)
         request.postpath.insert(0, path0)
+
+        deferred = request.notifyFinish()
+        self._pending_requests[deferred] = deferred
+        deferred.addBoth(self._decrement_requests, deferred=deferred)
+
         return self.wsgi_resource
+
+
+#
+# Site with deactivateable logging
+#
+
+class Website(server.Site):
+    """
+    This class will only log http requests if settings.DEBUG is True.
+    """
+    noisy = False
+
+    def log(self, request):
+        """Conditional logging"""
+        if _DEBUG:
+            server.Site.log(self, request)
 
 
 #

@@ -68,6 +68,7 @@ Installation/testing:
 """
 from __future__ import division
 
+import datetime
 import re
 from django.conf import settings
 from evennia import DefaultRoom
@@ -93,9 +94,9 @@ REGEXMAP = {"morning": (RE_MORNING, RE_AFTERNOON, RE_EVENING, RE_NIGHT),
 # set up the seasons and time slots. This assumes gametime started at the
 # beginning of the year (so month 1 is equivalent to January), and that
 # one CAN divide the game's year into four seasons in the first place ...
-MONTHS_PER_YEAR = settings.TIME_MONTH_PER_YEAR
+MONTHS_PER_YEAR = 12
 SEASONAL_BOUNDARIES = (3 / 12.0, 6 / 12.0, 9 / 12.0)
-HOURS_PER_DAY = settings.TIME_HOUR_PER_DAY
+HOURS_PER_DAY = 24
 DAY_BOUNDARIES = (0, 6 / 24.0, 12 / 24.0, 18 / 24.0)
 
 
@@ -108,7 +109,7 @@ class ExtendedRoom(DefaultRoom):
     look command.
     """
     def at_object_creation(self):
-        "Called when room is first created only."
+        """Called when room is first created only."""
         self.db.spring_desc = ""
         self.db.summer_desc = ""
         self.db.autumn_desc = ""
@@ -129,12 +130,13 @@ class ExtendedRoom(DefaultRoom):
         """
         Calculate the current time and season ids.
         """
-        # get the current time as parts of year and parts of day
-        # returns a tuple (years,months,weeks,days,hours,minutes,sec)
-        time = gametime.gametime(format=True)
-        month, hour = time[1], time[4]
-        season = float(month) / MONTHS_PER_YEAR
-        timeslot = float(hour) / HOURS_PER_DAY
+        # get the current time as parts of year and parts of day.
+        # we assume a standard calendar here and use 24h format.
+        timestamp = gametime.gametime(absolute=True)
+        # note that fromtimestamp includes the effects of server time zone!
+        datestamp = datetime.datetime.fromtimestamp(timestamp)
+        season = float(datestamp.month) / MONTHS_PER_YEAR
+        timeslot = float(datestamp.hour) / HOURS_PER_DAY
 
         # figure out which slots these represent
         if SEASONAL_BOUNDARIES[0] <= season < SEASONAL_BOUNDARIES[1]:
@@ -222,7 +224,6 @@ class ExtendedRoom(DefaultRoom):
             description (str): Our description.
 
         """
-        raw_desc = self.db.raw_desc or ""
         update = False
 
         # get current time and season
@@ -368,18 +369,21 @@ class CmdExtendedDesc(default_cmds.CmdDesc):
     aliases = ["@describe", "@detail"]
 
     def reset_times(self, obj):
-        "By deleteting the caches we force a re-load."
+        """By deleteting the caches we force a re-load."""
         obj.ndb.last_season = None
         obj.ndb.last_timeslot = None
 
     def func(self):
-        "Define extended command"
+        """Define extended command"""
         caller = self.caller
         location = caller.location
         if self.cmdstring == '@detail':
             # switch to detailing mode. This operates only on current location
             if not location:
                 caller.msg("No location to detail!")
+                return
+            if location.db.details is None:
+                caller.msg("|rThis location does not support details.|n")
                 return
             if self.switches and self.switches[0] in 'del':
                 # removing a detail.
@@ -390,14 +394,15 @@ class CmdExtendedDesc(default_cmds.CmdDesc):
                 return
             if not self.args:
                 # No args given. Return all details on location
-                string = "{wDetails on %s{n:\n" % location
-                string += "\n".join(" {w%s{n: %s" % (key, utils.crop(text)) for key, text in location.db.details.items())
-                caller.msg(string)
+                string = "|wDetails on %s|n:" % location
+                details = "\n".join(" |w%s|n: %s"
+                                    % (key, utils.crop(text)) for key, text in location.db.details.items())
+                caller.msg("%s\n%s" % (string, details) if details else "%s None." % string)
                 return
             if not self.rhs:
                 # no '=' used - list content of given detail
                 if self.args in location.db.details:
-                    string = "{wDetail '%s' on %s:\n{n" % (self.args, location)
+                    string = "|wDetail '%s' on %s:\n|n" % (self.args, location)
                     string += str(location.db.details[self.args])
                     caller.msg(string)
                 else:
@@ -412,21 +417,18 @@ class CmdExtendedDesc(default_cmds.CmdDesc):
             # we are doing a @desc call
             if not self.args:
                 if location:
-                    string = "{wDescriptions on %s{n:\n" % location.key
-                    string += " {wspring:{n %s\n" % location.db.spring_desc
-                    string += " {wsummer:{n %s\n" % location.db.summer_desc
-                    string += " {wautumn:{n %s\n" % location.db.autumn_desc
-                    string += " {wwinter:{n %s\n" % location.db.winter_desc
-                    string += " {wgeneral:{n %s" % location.db.general_desc
+                    string = "|wDescriptions on %s|n:\n" % location.key
+                    string += " |wspring:|n %s\n" % location.db.spring_desc
+                    string += " |wsummer:|n %s\n" % location.db.summer_desc
+                    string += " |wautumn:|n %s\n" % location.db.autumn_desc
+                    string += " |wwinter:|n %s\n" % location.db.winter_desc
+                    string += " |wgeneral:|n %s" % location.db.general_desc
                     caller.msg(string)
                     return
-            if self.switches and self.switches[0] in ("spring",
-                                                      "summer",
-                                                      "autumn",
-                                                      "winter"):
+            if self.switches and self.switches[0] in ("spring", "summer", "autumn", "winter"):
                 # a seasonal switch was given
                 if self.rhs:
-                    caller.msg("Seasonal descs only works with rooms, not objects.")
+                    caller.msg("Seasonal descs only work with rooms, not objects.")
                     return
                 switch = self.switches[0]
                 if not location:
@@ -453,9 +455,10 @@ class CmdExtendedDesc(default_cmds.CmdDesc):
                 else:
                     text = self.args
                     obj = location
-                obj.db.desc = text # a compatibility fallback
+                obj.db.desc = text  # a compatibility fallback
                 if obj.attributes.has("general_desc"):
                     obj.db.general_desc = text
+                    self.reset_times(obj)
                     caller.msg("General description was set on %s." % obj.key)
                 else:
                     # this is not an ExtendedRoom.
@@ -478,7 +481,7 @@ class CmdGameTime(default_cmds.MuxCommand):
     help_category = "General"
 
     def func(self):
-        "Reads time info from current room"
+        """Reads time info from current room"""
         location = self.caller.location
         if not location or not hasattr(location, "get_time_and_season"):
             self.caller.msg("No location available - you are outside time.")

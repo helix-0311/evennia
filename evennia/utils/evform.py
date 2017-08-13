@@ -61,10 +61,10 @@ character's width.
 Use as follows:
 
 ```python
-    import evform
+    from evennia import EvForm, EvTable
 
     # create a new form from the template
-    form = evform.EvForm("path/to/testform.py")
+    form = EvForm("path/to/testform.py")
 
     (MudForm can also take a dictionary holding
      the required keys FORMCHAR, TABLECHAR and FORM)
@@ -80,16 +80,16 @@ Use as follows:
                     8: 10,
                     9:  3})
     # create the EvTables
-    tableA = evform.EvTable("HP","MV","MP",
+    tableA = EvTable("HP","MV","MP",
                                table=[["**"], ["*****"], ["***"]],
                                border="incols")
-    tableB = evform.EvTable("Skill", "Value", "Exp",
+    tableB = EvTable("Skill", "Value", "Exp",
                                table=[["Shooting", "Herbalism", "Smithing"],
                                       [12,14,9],["550/1200", "990/1400", "205/900"]],
                                border="incols")
     # add the tables to the proper ids in the form
     form.map(tables={"A": tableA,
-                     "B": tableB}
+                     "B": tableB})
 
     # unicode is required since the example contains non-ascii characters
     print unicode(form)
@@ -232,8 +232,8 @@ class EvForm(object):
         table_coords = {}
 
         # Locate the identifier tags and the horizontal end coords for all forms
-        re_cellchar =  re.compile(r"%s+([^%s%s])%s+" % (cellchar, INVALID_FORMCHARS, cellchar, cellchar))
-        re_tablechar = re.compile(r"%s+([^%s%s|])%s+" % (tablechar, INVALID_FORMCHARS, tablechar, tablechar))
+        re_cellchar =  re.compile(r"%s+([^%s%s]+)%s+" % (cellchar, INVALID_FORMCHARS, cellchar, cellchar))
+        re_tablechar = re.compile(r"%s+([^%s%s|+])%s+" % (tablechar, INVALID_FORMCHARS, tablechar, tablechar))
         for iy, line in enumerate(_to_ansi(form, regexable=True)):
             # find cells
             ix0 = 0
@@ -345,7 +345,7 @@ class EvForm(object):
             for il, rectline in enumerate(rect):
                 formline = form[iy0+il]
                 # insert new content, replacing old
-                form[iy0+il] = formline = formline[:ix0] + rectline + formline[ix0+width:]
+                form[iy0+il] = formline[:ix0] + rectline + formline[ix0+width:]
         return form
 
     def map(self, cells=None, tables=None, **kwargs):
@@ -429,7 +429,7 @@ def _test():
     form = EvForm("evennia.utils.evform_test")
 
     # add data to each tagged form cell
-    form.map(cells={1: "|gTom the Bouncer",
+    form.map(cells={"AA": "|gTom the Bouncer",
                     2: "|yGriatch",
                     3: "A sturdy fellow",
                     4: 12,

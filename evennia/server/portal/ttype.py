@@ -27,6 +27,7 @@ MTTS = [(128, 'PROXY'),
         (2, 'VT100'),
         (1, 'ANSI')]
 
+
 class Ttype(object):
     """
     Handles ttype negotiations. Called and initiated by the
@@ -89,6 +90,7 @@ class Ttype(object):
         try:
             option = "".join(option).lstrip(IS)
         except TypeError:
+            # option is not on a suitable form for joining
             pass
 
         if self.ttype_step == 0:
@@ -103,20 +105,21 @@ class Ttype(object):
             # use name to identify support for xterm256. Many of these
             # only support after a certain version, but all support
             # it since at least 4 years. We assume recent client here for now.
-            xterm256 = False
-            if clientname.startswith("MUDLET"):
+            cupper = clientname.upper()
+            if cupper.startswith("MUDLET"):
                 # supports xterm256 stably since 1.1 (2010?)
-                xterm256 = clientname.split("MUDLET",1)[1].strip() >= "1.1"
+                xterm256 = cupper.split("MUDLET", 1)[1].strip() >= "1.1"
             else:
-                xterm256 = (clientname.startswith("XTERM") or
-                            clientname.endswith("-256COLOR") or
-                            clientname in ("ATLANTIS",      # > 0.9.9.0 (aug 2009)
-                                           "CMUD",          # > 3.04 (mar 2009)
-                                           "KILDCLIENT",    # > 2.2.0 (sep 2005)
-                                           "MUDLET",        # > beta 15 (sep 2009)
-                                           "MUSHCLIENT",    # > 4.02 (apr 2007)
-                                           "PUTTY",         # > 0.58 (apr 2005)
-                                           "BEIP"))         # > 2.00.206 (late 2009) (BeipMu)
+                xterm256 = (cupper.startswith("XTERM") or
+                            cupper.endswith("-256COLOR") or
+                            cupper in ("ATLANTIS",      # > 0.9.9.0 (aug 2009)
+                                       "CMUD",          # > 3.04 (mar 2009)
+                                       "KILDCLIENT",    # > 2.2.0 (sep 2005)
+                                       "MUDLET",        # > beta 15 (sep 2009)
+                                       "MUSHCLIENT",    # > 4.02 (apr 2007)
+                                       "PUTTY",         # > 0.58 (apr 2005)
+                                       "BEIP",          # > 2.00.206 (late 2009) (BeipMu)
+                                       "POTATO"))       # > 2.00 (maybe earlier)
 
             # all clients supporting TTYPE at all seem to support ANSI
             self.protocol.protocol_flags['ANSI'] = True
@@ -127,10 +130,11 @@ class Ttype(object):
         elif self.ttype_step == 2:
             # this is a term capabilities flag
             term = option
+            tupper = term.upper()
             # identify xterm256 based on flag
-            xterm256 = (term.endswith("-256color")         # Apple Terminal, old Tintin
-                        or term.endswith("xterm") and      # old Tintin, Putty
-                        not term.endswith("-color"))
+            xterm256 = (tupper.endswith("-256COLOR")         # Apple Terminal, old Tintin
+                        or tupper.endswith("XTERM") and      # old Tintin, Putty
+                        not tupper.endswith("-COLOR"))
             if xterm256:
                 self.protocol.protocol_flags['ANSI'] = True
                 self.protocol.protocol_flags['XTERM256'] = xterm256
@@ -141,7 +145,7 @@ class Ttype(object):
         elif self.ttype_step == 3:
             # the MTTS bitstring identifying term capabilities
             if option.startswith("MTTS"):
-                option = option.split(" ")[1]
+                option = option[4:].strip()
                 if option.isdigit():
                     # a number - determine the actual capabilities
                     option = int(option)

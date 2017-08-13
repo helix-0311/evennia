@@ -7,7 +7,7 @@ The separation works like this:
 
 Portal - (AMP client) handles protocols. It contains a list of connected
          sessions in a dictionary for identifying the respective player
-         connected. If it looses the AMP connection it will automatically
+         connected. If it loses the AMP connection it will automatically
          try to reconnect.
 
 Server - (AMP server) Handles all mud operations. The server holds its own list
@@ -19,8 +19,8 @@ from __future__ import print_function
 
 # imports needed on both server and portal side
 import os
-from time import time
-from collections import defaultdict
+import time
+from collections import defaultdict, namedtuple
 from itertools import count
 from cStringIO import StringIO
 try:
@@ -32,34 +32,33 @@ from twisted.internet import protocol
 from twisted.internet.defer import Deferred
 from evennia.utils import logger
 from evennia.utils.utils import to_str, variable_from_module
+import zlib  # Used in Compressed class
 
-class DummySession(object):
-    sessid = 0
-DUMMYSESSION = DummySession()
+DUMMYSESSION = namedtuple('DummySession', ['sessid'])(0)
 
 # communication bits
 # (chr(9) and chr(10) are \t and \n, so skipping them)
 
-PCONN = chr(1)        # portal session connect
-PDISCONN = chr(2)     # portal session disconnect
-PSYNC = chr(3)        # portal session sync
-SLOGIN = chr(4)       # server session login
-SDISCONN = chr(5)     # server session disconnect
-SDISCONNALL = chr(6)  # server session disconnect all
-SSHUTD = chr(7)       # server shutdown
-SSYNC = chr(8)        # server session sync
-SCONN = chr(11)        # server creating new connection (for irc/imc2 bots etc)
-PCONNSYNC = chr(12)   # portal post-syncing a session
+PCONN = chr(1)         # portal session connect
+PDISCONN = chr(2)      # portal session disconnect
+PSYNC = chr(3)         # portal session sync
+SLOGIN = chr(4)        # server session login
+SDISCONN = chr(5)      # server session disconnect
+SDISCONNALL = chr(6)   # server session disconnect all
+SSHUTD = chr(7)        # server shutdown
+SSYNC = chr(8)         # server session sync
+SCONN = chr(11)        # server creating new connection (for irc bots and etc)
+PCONNSYNC = chr(12)    # portal post-syncing a session
+PDISCONNALL = chr(13)  # portal session disconnect all
 AMP_MAXLEN = amp.MAX_VALUE_LENGTH    # max allowed data length in AMP protocol (cannot be changed)
 
-BATCH_RATE = 250    # max commands/sec before switching to batch-sending
-BATCH_TIMEOUT = 0.5 # how often to poll to empty batch queue, in seconds
+BATCH_RATE = 250     # max commands/sec before switching to batch-sending
+BATCH_TIMEOUT = 0.5  # how often to poll to empty batch queue, in seconds
 
 # buffers
 _SENDBATCH = defaultdict(list)
 _MSGBUFFER = defaultdict(list)
 
-import zlib
 
 def get_restart_mode(restart_file):
     """
@@ -84,6 +83,8 @@ class AmpServerFactory(protocol.ServerFactory):
     This factory creates the Server as a new AMPProtocol instance for accepting
     connections from the Portal.
     """
+    noisy = False
+
     def __init__(self, server):
         """
         Initialize the factory.
@@ -123,6 +124,7 @@ class AmpClientFactory(protocol.ReconnectingClientFactory):
     initialDelay = 1
     factor = 1.5
     maxDelay = 1
+    noisy = False
 
     def __init__(self, portal):
         """
@@ -170,6 +172,7 @@ class AmpClientFactory(protocol.ReconnectingClientFactory):
 
         """
         if hasattr(self, "server_restart_mode"):
+            self.portal.sessions.announce_all(" Server restarting ...")
             self.maxDelay = 2
         else:
             # Don't translate this; avoid loading django on portal side.
@@ -187,7 +190,6 @@ class AmpClientFactory(protocol.ReconnectingClientFactory):
             reason (str): Eventual text describing why connection failed.
 
         """
-        print ("portal retrying connection"), self.maxDelay
         if hasattr(self, "server_restart_mode"):
             self.maxDelay = 2
         else:
@@ -255,7 +257,7 @@ class MsgPortal2Server(amp.Command):
     """
     key = "MsgPortal2Server"
     arguments = [('packed_data', Compressed())]
-    errors = [(Exception, 'EXCEPTION')]
+    errors = {Exception: 'EXCEPTION'}
     response = []
 
 
@@ -266,7 +268,7 @@ class MsgServer2Portal(amp.Command):
     """
     key = "MsgServer2Portal"
     arguments = [('packed_data', Compressed())]
-    errors = [(Exception, 'EXCEPTION')]
+    errors = {Exception: 'EXCEPTION'}
     response = []
 
 
@@ -280,7 +282,7 @@ class AdminPortal2Server(amp.Command):
     """
     key = "AdminPortal2Server"
     arguments = [('packed_data', Compressed())]
-    errors = [(Exception, 'EXCEPTION')]
+    errors = {Exception: 'EXCEPTION'}
     response = []
 
 
@@ -294,7 +296,7 @@ class AdminServer2Portal(amp.Command):
     """
     key = "AdminServer2Portal"
     arguments = [('packed_data', Compressed())]
-    errors = [(Exception, 'EXCEPTION')]
+    errors = {Exception: 'EXCEPTION'}
     response = []
 
 
@@ -311,7 +313,7 @@ class FunctionCall(amp.Command):
                  ('function', amp.String()),
                  ('args', amp.String()),
                  ('kwargs', amp.String())]
-    errors = [(Exception, 'EXCEPTION')]
+    errors = {Exception: 'EXCEPTION'}
     response = [('result', amp.String())]
 
 
@@ -321,9 +323,9 @@ dumps = lambda data: to_str(pickle.dumps(to_str(data), pickle.HIGHEST_PROTOCOL))
 loads = lambda data: pickle.loads(to_str(data))
 
 
-#------------------------------------------------------------
+# -------------------------------------------------------------
 # Core AMP protocol for communication Server <-> Portal
-#------------------------------------------------------------
+# -------------------------------------------------------------
 
 class AMPProtocol(amp.AMP):
     """
@@ -346,7 +348,7 @@ class AMPProtocol(amp.AMP):
 
         """
         self.send_batch_counter = 0
-        self.send_reset_time = time()
+        self.send_reset_time = time.time()
         self.send_mode = True
         self.send_task = None
 
@@ -370,6 +372,18 @@ class AMPProtocol(amp.AMP):
             self.factory.portal.sessions.at_server_connection()
             if hasattr(self.factory, "server_restart_mode"):
                 del self.factory.server_restart_mode
+
+    def connectionLost(self, reason):
+        """
+        We swallow connection errors here. The reason is that during a
+        normal reload/shutdown there will almost always be cases where
+        either the portal or server shuts down before a message has
+        returned its (empty) return, triggering a connectionLost error
+        that is irrelevant. If a true connection error happens, the
+        portal will continuously try to reconnect, showing the problem
+        that way.
+        """
+        pass
 
     # Error handling
 
@@ -422,7 +436,9 @@ class AMPProtocol(amp.AMP):
 
         """
         sessid, kwargs = loads(packed_data)
-        self.factory.server.sessions.data_in(self.factory.server.sessions[sessid], **kwargs)
+        session = self.factory.server.sessions.get(sessid, None)
+        if session:
+            self.factory.server.sessions.data_in(session, **kwargs)
         return {}
 
     def send_MsgPortal2Server(self, session, **kwargs):
@@ -430,7 +446,7 @@ class AMPProtocol(amp.AMP):
         Access method called by the Portal and executed on the Portal.
 
         Args:
-            sessid (int): Unique Session id.
+            session (session): Session
             kwargs (any, optional): Optional data.
 
         Returns:
@@ -451,9 +467,10 @@ class AMPProtocol(amp.AMP):
             packed_data (str): Pickled data (sessid, kwargs) coming over the wire.
         """
         sessid, kwargs = loads(packed_data)
-        self.factory.portal.sessions.data_out(self.factory.portal.sessions[sessid], **kwargs)
+        session = self.factory.portal.sessions.get(sessid, None)
+        if session:
+            self.factory.portal.sessions.data_out(session, **kwargs)
         return {}
-
 
     def send_MsgServer2Portal(self, session, **kwargs):
         """
@@ -487,13 +504,18 @@ class AMPProtocol(amp.AMP):
             # create a new session and sync it
             server_sessionhandler.portal_connect(kwargs.get("sessiondata"))
 
-        elif operation == PCONNSYNC: #portal_session_sync
+        elif operation == PCONNSYNC:  # portal_session_sync
             server_sessionhandler.portal_session_sync(kwargs.get("sessiondata"))
 
         elif operation == PDISCONN:  # portal_session_disconnect
-            # session closed from portal side
-            session = server_sessionhandler[sessid]
-            self.factory.server.sessions.disconnect(session)
+            # session closed from portal sid
+            session = server_sessionhandler.get(sessid)
+            if session:
+                server_sessionhandler.portal_disconnect(session)
+
+        elif operation == PDISCONNALL:  # portal_disconnect_all
+            # portal orders all sessions to close
+            server_sessionhandler.portal_disconnect_all()
 
         elif operation == PSYNC:  # portal_session_sync
             # force a resync of sessions when portal reconnects to
@@ -521,7 +543,7 @@ class AMPProtocol(amp.AMP):
         """
         return self.send_data(AdminPortal2Server, session.sessid, operation=operation, **kwargs)
 
-    # Portal administraton from the Server side
+    # Portal administration from the Server side
 
     @AdminServer2Portal.responder
     def portal_receive_adminserver2portal(self, packed_data):
@@ -538,16 +560,17 @@ class AMPProtocol(amp.AMP):
         operation = kwargs.pop("operation")
         portal_sessionhandler = self.factory.portal.sessions
 
-
         if operation == SLOGIN:  # server_session_login
             # a session has authenticated; sync it.
-            session = portal_sessionhandler[sessid]
-            portal_sessionhandler.server_logged_in(session, kwargs.get("sessiondata"))
+            session = portal_sessionhandler.get(sessid)
+            if session:
+                portal_sessionhandler.server_logged_in(session, kwargs.get("sessiondata"))
 
         elif operation == SDISCONN:  # server_session_disconnect
             # the server is ordering to disconnect the session
-            session = portal_sessionhandler[sessid]
-            portal_sessionhandler.server_disconnect(session, reason=kwargs.get("reason"))
+            session = portal_sessionhandler.get(sessid)
+            if session:
+                portal_sessionhandler.server_disconnect(session, reason=kwargs.get("reason"))
 
         elif operation == SDISCONNALL:  # server_session_disconnect_all
             # server orders all sessions to disconnect
@@ -565,7 +588,7 @@ class AMPProtocol(amp.AMP):
             # set a flag in case we are about to shut down soon
             self.factory.server_restart_mode = True
 
-        elif operation == SCONN: # server_force_connection (for irc/imc2 etc)
+        elif operation == SCONN:  # server_force_connection (for irc/etc)
             portal_sessionhandler.server_connect(**kwargs)
 
         else:
@@ -639,4 +662,5 @@ class AMPProtocol(amp.AMP):
                                module=modulepath,
                                function=functionname,
                                args=dumps(args),
-                               kwargs=dumps(kwargs)).addCallback(lambda r: loads(r["result"])).addErrback(self.errback, "FunctionCall")
+                               kwargs=dumps(kwargs)).addCallback(
+            lambda r: loads(r["result"])).addErrback(self.errback, "FunctionCall")

@@ -8,10 +8,9 @@ are stored on the Portal side)
 """
 from builtins import object
 
-import re
 import weakref
 import importlib
-from time import time
+import time
 from django.utils import timezone
 from django.conf import settings
 from evennia.comms.models import ChannelDB
@@ -19,6 +18,7 @@ from evennia.utils import logger
 from evennia.utils.utils import make_iter, lazy_property
 from evennia.commands.cmdsethandler import CmdSetHandler
 from evennia.server.session import Session
+from evennia.scripts.monitorhandler import MONITOR_HANDLER
 
 ClientSessionStore = importlib.import_module(settings.SESSION_ENGINE).SessionStore
 
@@ -32,8 +32,9 @@ from django.utils.translation import ugettext as _
 
 # Handlers for Session.db/ndb operation
 
+
 class NDbHolder(object):
-    "Holder for allowing property access of attributes"
+    """Holder for allowing property access of attributes"""
     def __init__(self, obj, name, manager_name='attributes'):
         _SA(self, name, _GA(obj, manager_name))
         _SA(self, 'name', name)
@@ -145,9 +146,9 @@ class NAttributeHandler(object):
         return [key for key in self._store if not key.startswith("_")]
 
 
-#------------------------------------------------------------
+# -------------------------------------------------------------
 # Server Session
-#------------------------------------------------------------
+# -------------------------------------------------------------
 
 class ServerSession(Session):
     """
@@ -160,7 +161,7 @@ class ServerSession(Session):
 
     """
     def __init__(self):
-        "Initiate to avoid AttributeErrors down the line"
+        """Initiate to avoid AttributeErrors down the line"""
         self.puppet = None
         self.player = None
         self.cmdset_storage_string = ""
@@ -203,7 +204,7 @@ class ServerSession(Session):
             obj.player = self.player
             self.puid = obj.id
             self.puppet = obj
-            #obj.scripts.validate()
+            # obj.scripts.validate()
             obj.locks.cache_lock_bypass(obj)
 
     def at_login(self, player):
@@ -218,7 +219,7 @@ class ServerSession(Session):
         self.uid = self.player.id
         self.uname = self.player.username
         self.logged_in = True
-        self.conn_time = time()
+        self.conn_time = time.time()
         self.puid = None
         self.puppet = None
         self.cmdset_storage = settings.CMDSET_SESSION
@@ -259,6 +260,10 @@ class ServerSession(Session):
                 player.is_connected = False
             # this may be used to e.g. delete player after disconnection etc
             player.at_post_disconnect()
+            # remove any webclient settings monitors associated with this
+            # session
+            MONITOR_HANDLER.remove(player, "_saved_webclient_options",
+                                   self.sessid)
 
     def get_player(self):
         """
@@ -304,13 +309,13 @@ class ServerSession(Session):
                 in addition to the server log.
 
         """
-        if channel:
+        cchan = channel and settings.CHANNEL_CONNECTINFO
+        if cchan:
             try:
-                cchan = settings.CHANNEL_CONNECTINFO
                 cchan = ChannelDB.objects.get_channel(cchan[0])
                 cchan.msg("[%s]: %s" % (cchan.key, message))
             except Exception:
-                pass
+                logger.log_trace()
         logger.log_info(message)
 
     def get_client_size(self):
@@ -332,7 +337,7 @@ class ServerSession(Session):
 
         """
         # Idle time used for timeout calcs.
-        self.cmd_last = time()
+        self.cmd_last = time.time()
 
         # Store the timestamp of the user's last command.
         if not idle:
@@ -359,7 +364,6 @@ class ServerSession(Session):
             self.protocol_flags.update(kwargs)
             self.sessionhandler.session_portal_sync(self)
 
-
     def data_out(self, **kwargs):
         """
         Sending data from Evennia->Client
@@ -373,11 +377,25 @@ class ServerSession(Session):
         """
         self.sessionhandler.data_out(self, **kwargs)
 
+    def data_in(self, **kwargs):
+        """
+        Receiving data from the client, sending it off to
+        the respective inputfuncs.
+
+        Kwargs:
+            kwargs (any): Incoming data from protocol on
+                the form `{"commandname": ((args), {kwargs}),...}`
+        Notes:
+            This method is here in order to give the user
+            a single place to catch and possibly process all incoming data from
+            the client. It should usually always end by sending
+            this data off to `self.sessionhandler.call_inputfuncs(self, **kwargs)`.
+        """
+        self.sessionhandler.call_inputfuncs(self, **kwargs)
+
     def msg(self, text=None, **kwargs):
         """
-        Wrapper to mimic msg() functionality of Objects and Players
-        (server sessions don't use data_in since incoming data is
-        handled by inputfuncs).
+        Wrapper to mimic msg() functionality of Objects and Players.
 
         Args:
             text (str): String input.
@@ -418,8 +436,11 @@ class ServerSession(Session):
         self.sessionhandler.data_in(self, **kwargs)
 
     def __eq__(self, other):
-        "Handle session comparisons"
-        return self.address == other.address
+        """Handle session comparisons"""
+        try:
+            return self.address == other.address
+        except AttributeError:
+            return False
 
     def __str__(self):
         """
@@ -440,10 +461,8 @@ class ServerSession(Session):
         return "%s%s@%s" % (self.uname, symbol, address)
 
     def __unicode__(self):
-        "Unicode representation"
+        """Unicode representation"""
         return u"%s" % str(self)
-
-
 
     # Dummy API hooks for use during non-loggedin operation
 
@@ -466,7 +485,7 @@ class ServerSession(Session):
     def attributes(self):
         return self.nattributes
 
-    #@property
+    # @property
     def ndb_get(self):
         """
         A non-persistent store (ndb: NonDataBase). Everything stored
@@ -481,7 +500,7 @@ class ServerSession(Session):
             self._ndb_holder = NDbHolder(self, "nattrhandler", manager_name="nattributes")
             return self._ndb_holder
 
-    #@ndb.setter
+    # @ndb.setter
     def ndb_set(self, value):
         """
         Stop accidentally replacing the db object
@@ -491,12 +510,12 @@ class ServerSession(Session):
 
         """
         string = "Cannot assign directly to ndb object! "
-        string = "Use ndb.attr=value instead."
+        string += "Use ndb.attr=value instead."
         raise Exception(string)
 
-    #@ndb.deleter
+    # @ndb.deleter
     def ndb_del(self):
-        "Stop accidental deletion."
+        """Stop accidental deletion."""
         raise Exception("Cannot delete the ndb object!")
     ndb = property(ndb_get, ndb_set, ndb_del)
     db = property(ndb_get, ndb_set, ndb_del)
@@ -504,5 +523,5 @@ class ServerSession(Session):
     # Mock access method for the session (there is no lock info
     # at this stage, so we just present a uniform API)
     def access(self, *args, **kwargs):
-        "Dummy method to mimic the logged-in API."
+        """Dummy method to mimic the logged-in API."""
         return True

@@ -17,12 +17,14 @@ import sys
 import signal
 import shutil
 import importlib
+from distutils.version import LooseVersion
 from argparse import ArgumentParser
 from subprocess import Popen, check_output, call, CalledProcessError, STDOUT
 import django
 
 # Signal processing
 SIG = signal.SIGINT
+CTRL_C_EVENT = 0 # Windows SIGINT-like signal
 
 # Set up the main python paths to Evennia
 EVENNIA_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -56,8 +58,10 @@ SERVER_RESTART = None
 PORTAL_RESTART = None
 SERVER_PY_FILE = None
 PORTAL_PY_FILE = None
+TEST_MODE = False
+ENFORCED_SETTING = False
 
-
+# requirements
 PYTHON_MIN = '2.7'
 TWISTED_MIN = '16.0.0'
 DJANGO_MIN = '1.8'
@@ -163,7 +167,7 @@ ERROR_SETTINGS = \
            errors mentioning 'DJANGO_SETTINGS_MODULE'. If you run a
            virtual machine, it might be worth to restart it to see if
            this resolves the issue.
-    """.format(settingsfile=SETTINGFILE, settingspath=SETTINGS_PATH)
+    """.format(settingspath=SETTINGS_PATH)
 
 ERROR_INITSETTINGS = \
     """
@@ -227,10 +231,10 @@ INFO_WINDOWS_BATFILE = \
 
 CMDLINE_HELP = \
     """
-    Starts or operates the Evennia MU* server. Also allows for
+    Starts or operates the Evennia MU* server.  Allows for
     initializing a new game directory and manages the game's database.
-    You can also pass most standard django-admin arguments and
-    options.
+    Most standard django-admin arguments and options can also be
+    passed.
     """
 
 
@@ -311,7 +315,7 @@ ERROR_LOGDIR_MISSING = \
     will be created automatically).
 
     (Explanation: Evennia creates the log directory automatically when
-    initializating a new game directory. This error usually happens if
+    initializing a new game directory. This error usually happens if
     you used git to clone a pre-created game directory - since log
     files are in .gitignore they will not be cloned, which leads to
     the log directory also not being created.)
@@ -369,6 +373,21 @@ NOTE_KEYBOARDINTERRUPT = \
     STOP: Caught keyboard interrupt while in interactive mode.
     """
 
+NOTE_TEST_DEFAULT = \
+    """
+    TESTING: Using Evennia's default settings file (evennia.settings_default).
+    (use 'evennia --settings settings.py test .' to run tests on the game dir)
+    """
+
+NOTE_TEST_CUSTOM = \
+    """
+    TESTING: Using specified settings file '{settings_dotpath}'.
+
+    (Obs: Evennia's full test suite may not pass if the settings are very
+    different from the default. Use 'test .' as arguments to run only tests
+    on the game dir.)
+    """
+
 #------------------------------------------------------------
 #
 # Functions
@@ -383,9 +402,9 @@ def evennia_version():
     """
     version = "Unknown"
     try:
-        import evennia
         version = evennia.__version__
     except ImportError:
+        # even if evennia is not found, we should not crash here.
         pass
     try:
         rev = check_output(
@@ -393,6 +412,7 @@ def evennia_version():
             shell=True, cwd=EVENNIA_ROOT, stderr=STDOUT).strip()
         version = "%s (rev %s)" % (version, rev)
     except (IOError, CalledProcessError):
+        # move on if git is not answering
         pass
     return version
 
@@ -412,14 +432,14 @@ def check_main_evennia_dependencies():
 
     # Python
     pversion = ".".join(str(num) for num in sys.version_info if type(num) == int)
-    if pversion < PYTHON_MIN:
+    if LooseVersion(pversion) < LooseVersion(PYTHON_MIN):
         print(ERROR_PYTHON_VERSION.format(pversion=pversion, python_min=PYTHON_MIN))
         error = True
     # Twisted
     try:
         import twisted
         tversion = twisted.version.short()
-        if tversion < TWISTED_MIN:
+        if LooseVersion(tversion) < LooseVersion(TWISTED_MIN):
             print(ERROR_TWISTED_VERSION.format(
                 tversion=tversion, twisted_min=TWISTED_MIN))
             error = True
@@ -431,14 +451,14 @@ def check_main_evennia_dependencies():
         dversion = ".".join(str(num) for num in django.VERSION if type(num) == int)
         # only the main version (1.5, not 1.5.4.0)
         dversion_main = ".".join(dversion.split(".")[:2])
-        if dversion < DJANGO_MIN:
+        if LooseVersion(dversion) < LooseVersion(DJANGO_MIN):
             print(ERROR_DJANGO_MIN.format(
                 dversion=dversion_main, django_min=DJANGO_MIN))
             error = True
-        elif DJANGO_MIN <= dversion < DJANGO_REC:
+        elif LooseVersion(DJANGO_MIN) <= LooseVersion(dversion) < LooseVersion(DJANGO_REC):
             print(NOTE_DJANGO_MIN.format(
                 dversion=dversion_main, django_rec=DJANGO_REC))
-        elif DJANGO_REC < dversion_main:
+        elif LooseVersion(DJANGO_REC) < LooseVersion(dversion_main):
             print(NOTE_DJANGO_NEW.format(
                 dversion=dversion_main, django_rec=DJANGO_REC))
     except ImportError:
@@ -486,7 +506,7 @@ def create_secret_key():
     return secret_key
 
 
-def create_settings_file(init=True):
+def create_settings_file(init=True, secret_settings=False):
     """
     Uses the template settings file to build a working settings file.
 
@@ -494,18 +514,27 @@ def create_settings_file(init=True):
         init (bool): This is part of the normal evennia --init
             operation.  If false, this function will copy a fresh
             template file in (asking if it already exists).
+        secret_settings (bool, optional): If False, create settings.py, otherwise
+            create the secret_settings.py file.
 
     """
-    settings_path = os.path.join(GAMEDIR, "server", "conf", "settings.py")
+    if secret_settings:
+        settings_path = os.path.join(GAMEDIR, "server", "conf", "secret_settings.py")
+        setting_dict = {"secret_key": "\'%s\'" % create_secret_key()}
+    else:
+        settings_path = os.path.join(GAMEDIR, "server", "conf", "settings.py")
+        setting_dict = {
+            "settings_default": os.path.join(EVENNIA_LIB, "settings_default.py"),
+            "servername": "\"%s\"" % GAMEDIR.rsplit(os.path.sep, 1)[1].capitalize(),
+            "secret_key": "\'%s\'" % create_secret_key()}
 
     if not init:
         # if not --init mode, settings file may already exist from before
         if os.path.exists(settings_path):
-            inp = raw_input("server/conf/settings.py already exists. "
-                            "Do you want to reset it? y/[N]> ")
+            inp = input("%s already exists. Do you want to reset it? y/[N]> " % settings_path)
             if not inp.lower() == 'y':
                 print ("Aborted.")
-                sys.exit()
+                return
             else:
                 print ("Reset the settings file.")
 
@@ -514,12 +543,6 @@ def create_settings_file(init=True):
 
     with open(settings_path, 'r') as f:
         settings_string = f.read()
-
-    # tweak the settings
-    setting_dict = {
-        "settings_default": os.path.join(EVENNIA_LIB, "settings_default.py"),
-        "servername": "\"%s\"" % GAMEDIR.rsplit(os.path.sep, 1)[1].capitalize(),
-        "secret_key": "\'%s\'" % create_secret_key()}
 
     settings_string = settings_string.format(**setting_dict)
 
@@ -544,8 +567,13 @@ def create_game_directory(dirname):
         sys.exit()
     # copy template directory
     shutil.copytree(EVENNIA_TEMPLATE, GAMEDIR)
+    # rename gitignore to .gitignore
+    os.rename(os.path.join(GAMEDIR, 'gitignore'),
+              os.path.join(GAMEDIR, '.gitignore'))
+
     # pre-build settings file in the new GAMEDIR
     create_settings_file()
+    create_settings_file(secret_settings=True)
 
 
 def create_superuser():
@@ -573,7 +601,6 @@ def check_database():
         tables = [tableinfo.name for tableinfo in tables]
     if tables and u'players_playerdb' in tables:
         # database exists and seems set up. Initialize evennia.
-        import evennia
         evennia._init()
     # Try to get Player#1
     from evennia.players.models import PlayerDB
@@ -640,14 +667,14 @@ def get_pid(pidfile):
         pidfile (str): The path of the pid file.
 
     Returns:
-        pid (str): The process id.
+        pid (str or None): The process id.
 
     """
-    pid = None
     if os.path.exists(pidfile):
-        f = open(pidfile, 'r')
-        pid = f.read()
-    return pid
+        with open(pidfile, 'r') as f:
+            pid = f.read()
+            return pid
+    return None
 
 
 def del_pid(pidfile):
@@ -664,7 +691,7 @@ def del_pid(pidfile):
         os.remove(pidfile)
 
 
-def kill(pidfile, signal=SIG, succmsg="", errmsg="",
+def kill(pidfile, killsignal=SIG, succmsg="", errmsg="",
          restart_file=SERVER_RESTART, restart=False):
     """
     Send a kill signal to a process based on PID. A customized
@@ -673,7 +700,7 @@ def kill(pidfile, signal=SIG, succmsg="", errmsg="",
 
     Args:
         pidfile (str): The path of the pidfile to get the PID from.
-        signal (int, optional): Signal identifier.
+        killsignal (int, optional): Signal identifier for signal to send.
         succmsg (str, optional): Message to log on success.
         errmsg (str, optional): Message to log on failure.
         restart_file (str, optional): Restart file location.
@@ -694,7 +721,22 @@ def kill(pidfile, signal=SIG, succmsg="", errmsg="",
             with open(restart_file, 'w') as f:
                 f.write("shutdown")
         try:
-            os.kill(int(pid), signal)
+            if os.name == 'nt':
+                from win32api import GenerateConsoleCtrlEvent, SetConsoleCtrlHandler
+                try:
+                    # Windows can only send a SIGINT-like signal to
+                    # *every* process spawned off the same console, so we must
+                    # avoid killing ourselves here.
+                    SetConsoleCtrlHandler(None, True)
+                    GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0)
+                except KeyboardInterrupt:
+                    # We must catch and ignore the interrupt sent.
+                    pass
+            else:
+                # Linux can send the SIGINT signal directly
+                # to the specified PID.
+                os.kill(int(pid), killsignal)
+
         except OSError:
             print("Process %(pid)s cannot be stopped. "\
                   "The PID file 'server/%(pidfile)s' seems stale. "\
@@ -716,10 +758,8 @@ def show_version_info(about=False):
         version_info (str): A complete version info string.
 
     """
-    import os
     import sys
     import twisted
-    import django
 
     return VERSION_INFO.format(
         version=EVENNIA_VERSION, about=ABOUT_INFO if about else "",
@@ -736,60 +776,32 @@ def error_check_python_modules():
     python source files themselves). Best they fail already here
     before we get any further.
 
-    Raises:
-        DeprecationWarning: For trying to access various modules
-        (usually in `settings.py`) which are no longer supported.
-
     """
+
     from django.conf import settings
-    def imp(path, split=True):
+    def _imp(path, split=True):
+        "helper method"
         mod, fromlist = path, "None"
         if split:
             mod, fromlist = path.rsplit('.', 1)
         __import__(mod, fromlist=[fromlist])
 
+    # check the historical deprecations
+    from evennia.server import deprecations
+    try:
+        deprecations.check_errors(settings)
+        deprecations.check_warnings(settings)
+    except DeprecationWarning as err:
+        print(err)
+        sys.exit()
+
     # core modules
-    imp(settings.COMMAND_PARSER)
-    imp(settings.SEARCH_AT_RESULT)
-    imp(settings.CONNECTION_SCREEN_MODULE)
+    _imp(settings.COMMAND_PARSER)
+    _imp(settings.SEARCH_AT_RESULT)
+    _imp(settings.CONNECTION_SCREEN_MODULE)
     #imp(settings.AT_INITIAL_SETUP_HOOK_MODULE, split=False)
     for path in settings.LOCK_FUNC_MODULES:
-        imp(path, split=False)
-    # cmdsets
-
-    deprstring = ("settings.%s should be renamed to %s. If defaults are used, "
-                  "their path/classname must be updated "
-                  "(see evennia/settings_default.py).")
-    if hasattr(settings, "CMDSET_DEFAULT"):
-        raise DeprecationWarning(deprstring % (
-            "CMDSET_DEFAULT", "CMDSET_CHARACTER"))
-    if hasattr(settings, "CMDSET_OOC"):
-        raise DeprecationWarning(deprstring % ("CMDSET_OOC", "CMDSET_PLAYER"))
-    if settings.WEBSERVER_ENABLED and not isinstance(settings.WEBSERVER_PORTS[0], tuple):
-        raise DeprecationWarning(
-            "settings.WEBSERVER_PORTS must be on the form "
-            "[(proxyport, serverport), ...]")
-    if hasattr(settings, "BASE_COMM_TYPECLASS"):
-        raise DeprecationWarning(deprstring % (
-            "BASE_COMM_TYPECLASS", "BASE_CHANNEL_TYPECLASS"))
-    if hasattr(settings, "COMM_TYPECLASS_PATHS"):
-        raise DeprecationWarning(deprstring % (
-            "COMM_TYPECLASS_PATHS", "CHANNEL_TYPECLASS_PATHS"))
-    if hasattr(settings, "CHARACTER_DEFAULT_HOME"):
-        raise DeprecationWarning(
-            "settings.CHARACTER_DEFAULT_HOME should be renamed to "
-            "DEFAULT_HOME. See also settings.START_LOCATION "
-            "(see evennia/settings_default.py).")
-    deprstring = ("settings.%s is now merged into settings.TYPECLASS_PATHS. "
-                  "Update your settings file.")
-    if hasattr(settings, "OBJECT_TYPECLASS_PATHS"):
-        raise DeprecationWarning(deprstring % "OBJECT_TYPECLASS_PATHS")
-    if hasattr(settings, "SCRIPT_TYPECLASS_PATHS"):
-        raise DeprecationWarning(deprstring % "SCRIPT_TYPECLASS_PATHS")
-    if hasattr(settings, "PLAYER_TYPECLASS_PATHS"):
-        raise DeprecationWarning(deprstring % "PLAYER_TYPECLASS_PATHS")
-    if hasattr(settings, "CHANNEL_TYPECLASS_PATHS"):
-        raise DeprecationWarning(deprstring % "CHANNEL_TYPECLASS_PATHS")
+        _imp(path, split=False)
 
     from evennia.commands import cmdsethandler
     if not cmdsethandler.import_cmdset(settings.CMDSET_UNLOGGEDIN, None):
@@ -799,13 +811,12 @@ def error_check_python_modules():
     if not cmdsethandler.import_cmdset(settings.CMDSET_PLAYER, None):
         print("Warning: CMDSET_PLAYER failed to load")
     # typeclasses
-    imp(settings.BASE_PLAYER_TYPECLASS)
-    imp(settings.BASE_OBJECT_TYPECLASS)
-    imp(settings.BASE_CHARACTER_TYPECLASS)
-    imp(settings.BASE_ROOM_TYPECLASS)
-    imp(settings.BASE_EXIT_TYPECLASS)
-    imp(settings.BASE_SCRIPT_TYPECLASS)
-
+    _imp(settings.BASE_PLAYER_TYPECLASS)
+    _imp(settings.BASE_OBJECT_TYPECLASS)
+    _imp(settings.BASE_CHARACTER_TYPECLASS)
+    _imp(settings.BASE_ROOM_TYPECLASS)
+    _imp(settings.BASE_EXIT_TYPECLASS)
+    _imp(settings.BASE_SCRIPT_TYPECLASS)
 
 def init_game_directory(path, check_db=True):
     """
@@ -824,8 +835,13 @@ def init_game_directory(path, check_db=True):
     # Add gamedir to python path
     sys.path.insert(0, GAMEDIR)
 
-    if sys.argv[1] == 'test':
-        os.environ['DJANGO_SETTINGS_MODULE'] = 'evennia.settings_default'
+    if TEST_MODE:
+        if ENFORCED_SETTING:
+            print(NOTE_TEST_CUSTOM.format(settings_dotpath=SETTINGS_DOTPATH))
+            os.environ['DJANGO_SETTINGS_MODULE'] = SETTINGS_DOTPATH
+        else:
+            print(NOTE_TEST_DEFAULT)
+            os.environ['DJANGO_SETTINGS_MODULE'] = 'evennia.settings_default'
     else:
         os.environ['DJANGO_SETTINGS_MODULE'] = SETTINGS_DOTPATH
 
@@ -908,14 +924,15 @@ def init_game_directory(path, check_db=True):
 
             # note that we hope the twistd package won't change here, since we
             # try to get to the executable by relative path.
+            # Update: In 2016, it seems Twisted 16 has changed the name of
+            # of its executable from 'twistd.py' to 'twistd.exe'.
             twistd_path = os.path.abspath(
                 os.path.join(twistd_dir, os.pardir, os.pardir, os.pardir,
-                             os.pardir, 'scripts', 'twistd.py'))
+                             os.pardir, 'scripts', 'twistd.exe'))
 
             with open(batpath, 'w') as bat_file:
                 # build a custom bat file for windows
-                bat_file.write("@\"%s\" \"%s\" %%*" % (
-                    sys.executable, twistd_path))
+                bat_file.write("@\"%s\" %%*" % twistd_path)
 
             print(INFO_WINDOWS_BATFILE.format(twistd_path=twistd_path))
 
@@ -941,6 +958,8 @@ def run_dummyrunner(number_of_dummies):
     try:
         call(cmdstr, env=getenv())
     except KeyboardInterrupt:
+        # this signals the dummyrunner to stop cleanly and should
+        # not lead to a traceback here.
         pass
 
 
@@ -1039,7 +1058,7 @@ def run_menu():
         return
 
 
-def server_operation(mode, service, interactive, profiler, logserver=False):
+def server_operation(mode, service, interactive, profiler, logserver=False, doexit=False):
     """
     Handle argument options given on the command line.
 
@@ -1050,6 +1069,10 @@ def server_operation(mode, service, interactive, profiler, logserver=False):
         profiler (bool): Run the service under the profiler.
         logserver (bool, optional): Log Server data to logfile
             specified by settings.SERVER_LOG_FILE.
+        doexit (bool, optional): If True, immediately exit the runner after
+            starting the relevant processes. If the runner exits, Evennia
+            cannot be reloaded. This is meant to be used with an external
+            process manager like Linux' start-stop-daemon.
 
     """
 
@@ -1091,6 +1114,8 @@ def server_operation(mode, service, interactive, profiler, logserver=False):
                 cmdstr.append('--logserver')
             django.core.management.call_command(
                 'collectstatic', verbosity=1, interactive=False)
+        if doexit:
+            cmdstr.append('--doexit')
         cmdstr.extend([
             GAMEDIR, TWISTED_BINARY, SERVER_LOGFILE,
             PORTAL_LOGFILE, HTTP_LOGFILE])
@@ -1111,7 +1136,8 @@ def server_operation(mode, service, interactive, profiler, logserver=False):
         if os.name == 'nt':
             print(
                 "Restarting from command line is not supported under Windows. "
-                "Log into the game to restart.")
+                "Use the in-game command (@reload by default) "
+                "or use 'evennia stop && evennia start' for a cold reboot.")
             return
         if service == 'server':
             kill(SERVER_PIDFILE, SIG, "Server reloaded.",
@@ -1134,6 +1160,10 @@ def server_operation(mode, service, interactive, profiler, logserver=False):
                  errmsg % 'Server', SERVER_RESTART, restart=True)
 
     elif mode == 'stop':
+        if os.name == "nt":
+            print (
+                    "(Obs: You can use a single Ctrl-C to skip "
+                    "Windows' annoying 'Terminate batch job (Y/N)?' prompts.)")
         # stop processes, avoiding reload
         if service == 'server':
             kill(SERVER_PIDFILE, SIG,
@@ -1182,32 +1212,35 @@ def main():
     parser.add_argument(
         '--dummyrunner', nargs=1, action='store', dest='dummyrunner',
         metavar="N",
-        help="Tests a running server by connecting N dummy players to it.")
+        help="Test a running server by connecting N dummy players to it.")
     parser.add_argument(
         '--settings', nargs=1, action='store', dest='altsettings',
         default=None, metavar="filename.py",
-        help=("Start evennia with alternative settings file in "
-              "gamedir/server/conf/."))
+        help=("Start evennia with alternative settings file from "
+              "gamedir/server/conf/. (default is settings.py)"))
     parser.add_argument(
         '--initsettings', action='store_true', dest="initsettings",
         default=False,
-        help="Creates a new, empty settings file as gamedir/server/conf/settings.py.")
+        help="Create a new, empty settings file as gamedir/server/conf/settings.py.")
     parser.add_argument(
-        "option", nargs='?', default="noop",
-        help="Operational mode: 'start', 'stop', 'restart' or 'menu'.")
+        '--external-runner', action='store_true', dest="doexit",
+        default=False,
+        help="Handle server restart with an external process manager.")
+    parser.add_argument(
+        "operation", nargs='?', default="noop",
+        help="Operation to perform: 'start', 'stop', 'reload' or 'menu'.")
     parser.add_argument(
         "service", metavar="component", nargs='?', default="all",
-        help=("Server component to operate on: "
-              "'server', 'portal' or 'all' (default)."))
+        help=("Which component to operate on: "
+              "'server', 'portal' or 'all' (default if not set)."))
     parser.epilog = (
-        "Example django-admin commands: "
-        "'migrate', 'flush', 'shell' and 'dbshell'. "
-        "See the django documentation for more django-admin commands.")
+            "Common usage: evennia start|stop|reload. Django-admin database commands:"
+        "evennia migration|flush|shell|dbshell (see the django documentation for more django-admin commands.)")
 
     args, unknown_args = parser.parse_known_args()
 
     # handle arguments
-    option, service = args.option, args.service
+    option, service = args.operation, args.service
 
     # make sure we have everything
     check_main_evennia_dependencies()
@@ -1232,11 +1265,13 @@ def main():
     if args.altsettings:
         # use alternative settings file
         sfile = args.altsettings[0]
-        global SETTINGSFILE, SETTINGS_DOTPATH
+        global SETTINGSFILE, SETTINGS_DOTPATH, ENFORCED_SETTING
         SETTINGSFILE = sfile
+        ENFORCED_SETTING = True
         SETTINGS_DOTPATH = "server.conf.%s" % sfile.rstrip(".py")
         print("Using settings file '%s' (%s)." % (
             SETTINGSFILE, SETTINGS_DOTPATH))
+
 
     if args.initsettings:
         # create new settings file
@@ -1264,7 +1299,7 @@ def main():
     elif option in ('start', 'reload', 'stop'):
         # operate the server directly
         init_game_directory(CURRENT_DIR, check_db=True)
-        server_operation(option, service, args.interactive, args.profiler, args.logserver)
+        server_operation(option, service, args.interactive, args.profiler, args.logserver, doexit=args.doexit)
     elif option != "noop":
         # pass-through to django manager
         check_db = False
@@ -1274,6 +1309,9 @@ def main():
             # to use the shell we need to initialize it first,
             # and this only works if the database is set up
             check_db = True
+        if option == "test":
+            global TEST_MODE
+            TEST_MODE = True
         init_game_directory(CURRENT_DIR, check_db=check_db)
 
         args = [option]

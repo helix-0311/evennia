@@ -33,6 +33,10 @@ Possible keywords are:
     aliases - string or list of strings
     tags - string or list of strings
     ndb_<name> - value of a nattribute (ndb_ is stripped)
+    exec - this is a string of python code to execute or a list of such codes.
+        This can be used e.g. to trigger custom handlers on the object. The
+        execution environment contains 'evennia' for the library and 'obj'
+        for accessing the just created object.
     any other keywords are interpreted as Attributes and their values.
 
 Each value can also be a callable that takes no arguments. It should
@@ -78,12 +82,13 @@ many traits with a normal *goblin*.
 from __future__ import print_function
 
 import copy
-#TODO
-#sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-#os.environ['DJANGO_SETTINGS_MODULE'] = 'game.settings'
+# TODO
+# sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+# os.environ['DJANGO_SETTINGS_MODULE'] = 'game.settings'
 
 from django.conf import settings
 from random import randint
+import evennia
 from evennia.objects.models import ObjectDB
 from evennia.utils.utils import make_iter, all_from_module, dbid_to_obj
 
@@ -126,8 +131,9 @@ def _get_prototype(dic, prot, protparents):
             new_prot = _get_prototype(protparents.get(prototype, {}), prot, protparents)
             prot.update(new_prot)
     prot.update(dic)
-    prot.pop("prototype", None) # we don't need this anymore
+    prot.pop("prototype", None)  # we don't need this anymore
     return prot
+
 
 def _batch_create_object(*objparams):
     """
@@ -136,7 +142,7 @@ def _batch_create_object(*objparams):
     so make sure the spawned Typeclass works before using this!
 
     Args:
-        objsparams (any): Aach argument should be a tuple of arguments
+        objsparams (any): Each argument should be a tuple of arguments
             for the respective creation/add handlers in the following
             order: (create, permissions, locks, aliases, nattributes,
             attributes)
@@ -148,8 +154,9 @@ def _batch_create_object(*objparams):
     # bulk create all objects in one go
 
     # unfortunately this doesn't work since bulk_create doesn't creates pks;
-    # the result are double objects at the next stage
-    #dbobjs = _ObjectDB.objects.bulk_create(dbobjs)
+    # the result would be duplicate objects at the next stage, so we comment
+    # it out for now:
+    #  dbobjs = _ObjectDB.objects.bulk_create(dbobjs)
 
     dbobjs = [ObjectDB(**objparam[0]) for objparam in objparams]
     objs = []
@@ -162,9 +169,13 @@ def _batch_create_object(*objparams):
                            "aliases": objparam[3],
                            "nattributes": objparam[4],
                            "attributes": objparam[5],
-                           "tags":objparam[6]}
+                           "tags": objparam[6]}
         # this triggers all hooks
         obj.save()
+        # run eventual extra code
+        for code in objparam[7]:
+            if code:
+                exec(code, {}, {"evennia": evennia, "obj": obj})
         objs.append(obj)
     return objs
 
@@ -192,9 +203,9 @@ def spawn(*prototypes, **kwargs):
     if not protmodules and hasattr(settings, "PROTOTYPE_MODULES"):
         protmodules = make_iter(settings.PROTOTYPE_MODULES)
     for prototype_module in protmodules:
-        protparents.update(dict((key, val)
-                for key, val in all_from_module(prototype_module).items() if isinstance(val, dict)))
-    #overload module's protparents with specifically given protparents
+        protparents.update(dict((key, val) for key, val in
+                                all_from_module(prototype_module).items() if isinstance(val, dict)))
+    # overload module's protparents with specifically given protparents
     protparents.update(kwargs.get("prototype_parents", {}))
     for key, prototype in protparents.items():
         _validate_prototype(key, prototype, protparents, [])
@@ -211,32 +222,48 @@ def spawn(*prototypes, **kwargs):
         if not prot:
             continue
 
-        # extract the keyword args we need to create the object itself
+        # extract the keyword args we need to create the object itself. If we get a callable,
+        # call that to get the value (don't catch errors)
         create_kwargs = {}
-        create_kwargs["db_key"] = prot.pop("key", "Spawned Object %06i" % randint(1,100000))
-        create_kwargs["db_location"] = _handle_dbref(prot.pop("location", None))
-        create_kwargs["db_home"] = _handle_dbref(prot.pop("home", settings.DEFAULT_HOME))
-        create_kwargs["db_destination"] = _handle_dbref(prot.pop("destination", None))
-        create_kwargs["db_typeclass_path"] = prot.pop("typeclass", settings.BASE_OBJECT_TYPECLASS)
+        keyval = prot.pop("key", "Spawned Object %06i" % randint(1, 100000))
+        create_kwargs["db_key"] = keyval() if callable(keyval) else keyval
+
+        locval = prot.pop("location", None)
+        create_kwargs["db_location"] = locval() if callable(locval) else _handle_dbref(locval)
+
+        homval = prot.pop("home", settings.DEFAULT_HOME)
+        create_kwargs["db_home"] = homval() if callable(homval) else _handle_dbref(homval)
+
+        destval = prot.pop("destination", None)
+        create_kwargs["db_destination"] = destval() if callable(destval) else _handle_dbref(destval)
+
+        typval = prot.pop("typeclass", settings.BASE_OBJECT_TYPECLASS)
+        create_kwargs["db_typeclass_path"] = typval() if callable(typval) else typval
 
         # extract calls to handlers
-        permission_string = prot.pop("permissions", "")
-        lock_string = prot.pop("locks", "")
-        alias_string = prot.pop("aliases", "")
-        tags = prot.pop("tags", "")
+        permval = prot.pop("permissions", "")
+        permission_string = permval() if callable(permval) else permval
+        lockval = prot.pop("locks", "")
+        lock_string = lockval() if callable(lockval) else lockval
+        aliasval = prot.pop("aliases", "")
+        alias_string = aliasval() if callable(aliasval) else aliasval
+        tagval = prot.pop("tags", "")
+        tags = tagval() if callable(tagval) else tagval
+        exval = prot.pop("exec", "")
+        execs = make_iter(exval() if callable(exval) else exval)
 
         # extract ndb assignments
-        nattributes = dict((key.split("_", 1)[1], value if callable(value) else value)
-                            for key, value in prot.items() if key.startswith("ndb_"))
+        nattributes = dict((key.split("_", 1)[1], value() if callable(value) else value)
+                           for key, value in prot.items() if key.startswith("ndb_"))
 
         # the rest are attributes
         attributes = dict((key, value() if callable(value) else value)
-                           for key, value in prot.items()
-                           if not (key in _CREATE_OBJECT_KWARGS or key.startswith("ndb_")))
+                          for key, value in prot.items()
+                          if not (key in _CREATE_OBJECT_KWARGS or key.startswith("ndb_")))
 
         # pack for call into _batch_create_object
-        objsparams.append( (create_kwargs, permission_string, lock_string,
-                            alias_string, nattributes, attributes, tags) )
+        objsparams.append((create_kwargs, permission_string, lock_string,
+                           alias_string, nattributes, attributes, tags, execs))
 
     return _batch_create_object(*objsparams)
 
@@ -246,33 +273,35 @@ if __name__ == "__main__":
 
     protparents = {
             "NOBODY": {},
-            #"INFINITE" : {
-            #    "prototype":"INFINITE"
-            #},
-            "GOBLIN" : {
+            # "INFINITE" : {
+            #     "prototype":"INFINITE"
+            # },
+            "GOBLIN": {
              "key": "goblin grunt",
-             "health": lambda: randint(20,30),
+             "health": lambda: randint(20, 30),
              "resists": ["cold", "poison"],
              "attacks": ["fists"],
              "weaknesses": ["fire", "light"]
              },
-            "GOBLIN_WIZARD" : {
+            "GOBLIN_WIZARD": {
              "prototype": "GOBLIN",
              "key": "goblin wizard",
              "spells": ["fire ball", "lighting bolt"]
              },
-            "GOBLIN_ARCHER" : {
+            "GOBLIN_ARCHER": {
              "prototype": "GOBLIN",
              "key": "goblin archer",
              "attacks": ["short bow"]
             },
-            "ARCHWIZARD" : {
+            "ARCHWIZARD": {
              "attacks": ["archwizard staff"],
             },
-            "GOBLIN_ARCHWIZARD" : {
+            "GOBLIN_ARCHWIZARD": {
              "key": "goblin archwizard",
-             "prototype" : ("GOBLIN_WIZARD", "ARCHWIZARD")
+             "prototype": ("GOBLIN_WIZARD", "ARCHWIZARD")
             }
         }
     # test
-    print([o.key for o in spawn(protparents["GOBLIN"], protparents["GOBLIN_ARCHWIZARD"], prototype_parents=protparents)])
+    print([o.key for o in spawn(protparents["GOBLIN"],
+                                protparents["GOBLIN_ARCHWIZARD"],
+                                prototype_parents=protparents)])

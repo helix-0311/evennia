@@ -79,7 +79,6 @@ class SharedMemoryModelBase(ModelBase):
         # the dbmodel is either the proxy base or ourselves
         dbmodel = cls._meta.proxy_for_model if cls._meta.proxy else cls
         cls.__dbclass__ = dbmodel
-        dbmodel._idmapper_recache_protection = False
         if not hasattr(dbmodel, "__instance_cache__"):
             # we store __instance_cache__ only on the dbmodel base
             dbmodel.__instance_cache__ = {}
@@ -135,10 +134,6 @@ class SharedMemoryModelBase(ModelBase):
                 "Setter only used on foreign key relations, allows setting with #dbref"
                 if _GA(cls, "_is_deleted"):
                     raise ObjectDoesNotExist("Cannot set %s to %s: Hosting object was already deleted!" % (fname, value))
-                try:
-                    value = _GA(value, "dbobj")
-                except AttributeError:
-                    pass
                 if isinstance(value, (basestring, int)):
                     value = to_str(value, force_string=True)
                     if (value.isdigit() or value.startswith("#")):
@@ -274,6 +269,7 @@ class SharedMemoryModel(with_metaclass(SharedMemoryModelBase, Model)):
                     # at first initialization
                     instance.at_init()
                 except AttributeError:
+                    # The at_init hook is not assigned to all entities
                     pass
 
     @classmethod
@@ -291,9 +287,12 @@ class SharedMemoryModel(with_metaclass(SharedMemoryModelBase, Model)):
 
         """
         try:
-            if force or not cls._idmapper_recache_protection:
+            if force or cls.at_idmapper_flush():
                 del cls.__dbclass__.__instance_cache__[key]
+            else:
+                cls._dbclass__.__instance_cache__[key].refresh_from_db()
         except KeyError:
+            # No need to remove if cache doesn't contain it already
             pass
 
     @classmethod
@@ -319,27 +318,33 @@ class SharedMemoryModel(with_metaclass(SharedMemoryModelBase, Model)):
             cls.__dbclass__.__instance_cache__ = {}
         else:
             cls.__dbclass__.__instance_cache__ = dict((key, obj) for key, obj in cls.__dbclass__.__instance_cache__.items()
-                                                      if obj._idmapper_recache_protection)
+                                                      if not obj.at_idmapper_flush())
     #flush_instance_cache = classmethod(flush_instance_cache)
 
     # per-instance methods
 
+    def at_idmapper_flush(self):
+        """
+        This is called when the idmapper cache is flushed and
+        allows customized actions when this happens.
+
+        Returns:
+            do_flush (bool): If True, flush this object as normal. If
+                False, don't flush and expect this object to handle
+                the flushing on its own.
+        """
+        return True
+
     def flush_from_cache(self, force=False):
         """
         Flush this instance from the instance cache. Use
-        `force` to override recache_protection for the object.
+        `force` to override the result of at_idmapper_flush() for the object.
 
         """
         pk = self._get_pk_val()
-        if pk and (force or not self._idmapper_recache_protection):
-            self.__class__.__dbclass__.__instance_cache__.pop(pk, None)
-
-    def set_recache_protection(self, mode=True):
-        """
-        Set if this instance should be allowed to be recached.
-
-        """
-        self._idmapper_recache_protection = bool(mode)
+        if pk:
+            if force or self.at_idmapper_flush():
+                self.__class__.__dbclass__.__instance_cache__.pop(pk, None)
 
     def delete(self, *args, **kwargs):
         """
@@ -363,7 +368,7 @@ class SharedMemoryModel(with_metaclass(SharedMemoryModelBase, Model)):
         """
         global _MONITOR_HANDLER
         if not _MONITOR_HANDLER:
-            from evennia.scripts.monitorhandler import MONITOR_HANDLER as _MONITORHANDLER
+            from evennia.scripts.monitorhandler import MONITOR_HANDLER as _MONITOR_HANDLER
 
         if _IS_SUBPROCESS:
             # we keep a store of objects modified in subprocesses so
@@ -394,7 +399,7 @@ class SharedMemoryModel(with_metaclass(SharedMemoryModelBase, Model)):
         for field in update_fields:
             fieldname = field.name
             # trigger eventual monitors
-            _MONITORHANDLER.at_update(self, fieldname)
+            _MONITOR_HANDLER.at_update(self, fieldname)
             # if a hook is defined it must be named exactly on this form
             hookname = "at_%s_postsave" % fieldname
             if hasattr(self, hookname) and callable(_GA(self, hookname)):
@@ -415,7 +420,6 @@ class WeakSharedMemoryModelBase(SharedMemoryModelBase):
     def _prepare(cls):
         super(WeakSharedMemoryModelBase, cls)._prepare()
         cls.__dbclass__.__instance_cache__ = WeakValueDictionary()
-        cls._idmapper_recache_protection = False
 
 
 class WeakSharedMemoryModel(with_metaclass(WeakSharedMemoryModelBase, SharedMemoryModel)):
@@ -429,10 +433,9 @@ class WeakSharedMemoryModel(with_metaclass(WeakSharedMemoryModelBase, SharedMemo
 
 def flush_cache(**kwargs):
     """
-    Flush idmapper cache. When doing so the cache will
-    look for a property `_idmapper_cache_flush_safe` on the
-    class/subclass instance and only flush if this
-    is `True`.
+    Flush idmapper cache. When doing so the cache will fire the
+    at_idmapper_flush hook to allow the object to optionally handle
+    its own flushing.
 
     Uses a signal so we make sure to catch cascades.
 
@@ -569,7 +572,7 @@ def cache_size(mb=True):
             if not subclasses:
                 num = len(submodel.get_all_cached_instances())
                 numtotal[0] += num
-                classdict[submodel.__name__] = num
+                classdict[submodel.__dbclass__.__name__] = num
             else:
                 get_recurse(subclasses)
     get_recurse(SharedMemoryModel.__subclasses__())

@@ -18,9 +18,6 @@ from future.utils import with_metaclass
 __all__ = ["DefaultScript", "DoNothing", "Store"]
 
 
-_GA = object.__getattribute__
-_SESSIONS = None
-
 class ExtendedLoopingCall(LoopingCall):
     """
     LoopingCall that can start at a delay different
@@ -100,7 +97,7 @@ class ExtendedLoopingCall(LoopingCall):
         if self.start_delay:
             self.start_delay = None
             self.starttime = self.clock.seconds()
-        super(ExtendedLoopingCall, self).__call__()
+        LoopingCall.__call__(self)
 
     def force_repeat(self):
         """
@@ -210,6 +207,7 @@ class DefaultScript(ScriptBase):
         try:
             self.db_obj.msg(estring)
         except Exception:
+            # we must not crash inside the errback, even if db_obj is None.
             pass
         logger.log_err(estring)
 
@@ -240,6 +238,7 @@ class DefaultScript(ScriptBase):
             return maybeDeferred(self._step_callback).addErrback(self._step_errback)
         except Exception:
             logger.log_trace()
+        return None
 
     # Public methods
 
@@ -278,6 +277,7 @@ class DefaultScript(ScriptBase):
         task = self.ndb._task
         if task:
             return max(0, self.db_repeats - task.callcount)
+        return None
 
     def start(self, force_restart=False):
         """
@@ -395,6 +395,11 @@ class DefaultScript(ScriptBase):
             # if this script was paused manually (by a direct call of pause),
             # it cannot be automatically unpaused (e.g. by a @reload)
             raise RuntimeError
+
+        # Ensure that the script is fully unpaused, so that future calls
+        # to unpause do not raise a RuntimeError
+        self.db._manual_pause = False
+
         if self.db._paused_time:
             # only unpause if previously paused
             self.is_active = True
@@ -429,6 +434,11 @@ class DefaultScript(ScriptBase):
             logger.log_trace()
         self._stop_task()
         self.is_active = False
+        # remove all pause flags
+        del self.db._paused_time
+        del self.db._manual_pause
+        del self.db._paused_callcount
+        # set new flags and start over
         if interval is not None:
             self.interval = interval
         if repeats is not None:

@@ -80,6 +80,8 @@ __all__ = ("import_cmdset", "CmdSetHandler")
 _CACHED_CMDSETS = {}
 _CMDSET_PATHS = utils.make_iter(settings.CMDSET_PATHS)
 _IN_GAME_ERRORS = settings.IN_GAME_ERRORS
+_CMDSET_FALLBACKS = settings.CMDSET_FALLBACKS
+
 
 # Output strings
 
@@ -101,6 +103,16 @@ _ERROR_CMDSET_EXCEPTION = _(
 """{traceback}
 Compile/Run error when loading cmdset '{path}'.",
 (Traceback was logged {timestamp})""")
+
+_ERROR_CMDSET_FALLBACK = _(
+"""
+Error encountered for cmdset at path '{path}'.
+Replacing with fallback '{fallback_path}'.
+""")
+
+_ERROR_CMDSET_NO_FALLBACK = _(
+"""Fallback path '{fallback_path}' failed to generate a cmdset."""
+)
 
 
 class _ErrorCmdSet(CmdSet):
@@ -182,7 +194,6 @@ def import_cmdset(path, cmdsetobj, emit_to_obj=None, no_logging=False):
             #instantiate the cmdset (and catch its errors)
             if callable(cmdsetclass):
                 cmdsetclass = cmdsetclass(cmdsetobj)
-            errstring = ""
             return cmdsetclass
         except ImportError as err:
             logger.log_trace()
@@ -224,7 +235,7 @@ def import_cmdset(path, cmdsetobj, emit_to_obj=None, no_logging=False):
         err_cmdset = _ErrorCmdSet()
         err_cmdset.errmessage = errstring
         return err_cmdset
-
+    return None # undefined error
 
 # classes
 
@@ -352,6 +363,22 @@ class CmdSetHandler(object):
                     elif path:
                         cmdset = self._import_cmdset(path)
                         if cmdset:
+                            if cmdset.key == '_CMDSET_ERROR':
+                                # If a cmdset fails to load, check if we have a fallback path to use
+                                fallback_path = _CMDSET_FALLBACKS.get(path, None)
+                                if fallback_path:
+                                    err = _ERROR_CMDSET_FALLBACK.format(path=path, fallback_path=fallback_path)
+                                    logger.log_err(err)
+                                    if _IN_GAME_ERRORS:
+                                        self.obj.msg(err)
+                                    cmdset = self._import_cmdset(fallback_path)
+                                # If no cmdset is returned from the fallback, we can't go further
+                                if not cmdset:
+                                    err = _ERROR_CMDSET_NO_FALLBACK.format(fallback_path=fallback_path)
+                                    logger.log_err(err)
+                                    if _IN_GAME_ERRORS:
+                                        self.obj.msg(err)
+                                    continue
                             cmdset.permanent = cmdset.key != '_CMDSET_ERROR'
                             self.cmdset_stack.append(cmdset)
 
@@ -490,6 +517,7 @@ class CmdSetHandler(object):
                             storage.remove(cset.path)
                             updated = True
                         except ValueError:
+                            # nothing to remove
                             pass
                 if updated:
                     self.obj.cmdset_storage = storage
@@ -498,6 +526,7 @@ class CmdSetHandler(object):
                 try:
                     self.cmdset_stack.remove(cset)
                 except ValueError:
+                    # nothing to remove
                     pass
         # re-sync the cmdsethandler.
         self.update()
@@ -537,12 +566,13 @@ class CmdSetHandler(object):
             self.obj.cmdset_storage = storage
         self.update()
 
-    def has_cmdset(self, cmdset_key, must_be_default=False):
+    def has(self, cmdset, must_be_default=False):
         """
-        checks so the cmdsethandler contains a cmdset with the given key.
+        checks so the cmdsethandler contains a given cmdset
 
         Args:
-            cmdset_key (str): Cmdset key to check
+            cmdset (str or Cmdset): Cmdset key, pythonpath or
+                Cmdset to check the existence for.
             must_be_default (bool, optional): Only return True if
                 the checked cmdset is the default one.
 
@@ -550,10 +580,27 @@ class CmdSetHandler(object):
             has_cmdset (bool): Whether or not the cmdset is in the handler.
 
         """
-        if must_be_default:
-            return self.cmdset_stack and self.cmdset_stack[0].key == cmdset_key
+        if callable(cmdset) and hasattr(cmdset, 'path'):
+            # try it as a callable
+            print "Try callable", cmdset
+            if must_be_default:
+                return self.cmdset_stack and (self.cmdset_stack[0].path == cmdset.path)
+            else:
+                print [cset.path for cset in self.cmdset_stack], cmdset.path
+                return any([cset for cset in self.cmdset_stack
+                                        if cset.path == cmdset.path])
         else:
-            return any([cmdset.key == cmdset_key for cmdset in self.cmdset_stack])
+            # try it as a path or key
+            if must_be_default:
+                return self.cmdset_stack and (
+                        self.cmdset_stack[0].key == cmdset or
+                        self.cmdset_stack[0].path == cmdset)
+            else:
+                return any([cset for cset in self.cmdset_stack
+                              if cset.path == cmdset or cset.key == cmdset])
+
+    # backwards-compatability alias
+    has_cmdset = has
 
     def reset(self):
         """
